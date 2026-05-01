@@ -1,0 +1,6 @@
+# Ensure consistent line endings
+* text=auto
+
+# Don't include large data in archive exports
+data/screenshots/** export-ignore
+data/**/ *.db export-ignore
