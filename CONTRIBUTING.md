@@ -1,19 +1,24 @@
-Thank you for your interest in contributing to this project!
+感谢你对本项目的贡献！
 
-Guidelines
-- Fork the repository and create a feature branch for your change.
-- Use clear commit messages and follow a simple style (imperative mood).
-- Open a Pull Request describing the problem you solve and any testing steps.
+指南
+- 请先 Fork 本仓库，然后为你的改动创建一个 feature 分支（例如 `feature/xxx`）。
+- 使用清晰的提交信息，建议使用简短的祈使句（例如：`fix: 修复 X 问题`）。
+- 提交完成后发起 Pull Request，并在 PR 描述中说明你解决的问题、实现思路与测试步骤。
 
-Coding style
-- Keep Python code compatible with Python 3.10+.
-- Avoid introducing new heavy runtime dependencies without discussion.
+代码风格
+- 代码应兼容 Python 3.10 及以上版本。
+- 未经讨论，请避免引入体积较大或不必要的运行时依赖。
 
-Testing
-- If you add behavior, include tests under a `tests/` directory.
+测试
+- 如果新增或修改了功能，请为其添加测试，放在 `tests/` 目录下。
 
-Issues
-- Open issues with reproduction steps and sample input when possible.
+问题报告（Issues）
+- 提交 Issue 时请尽量提供可复现的步骤、示例输入和预期/实际结果，以便更快定位问题。
 
-Security and tokens
-- Never commit tokens or secrets. Use `.env` and add it to `.gitignore`.
+安全与密钥
+- 切勿将密钥、令牌或其他敏感信息提交到仓库。请使用 `.env` 配置并确保 `.gitignore` 中已忽略该文件。
+
+联系方式与贡献者协议
+- 如需讨论大范围架构变更或新增重大功能，建议先在 Issue 中提案并征求意见。
+
+非常感谢你的贡献与支持！
