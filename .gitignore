@@ -53,5 +53,8 @@ build/
 # Images/screenshots (optional: keep them out of repo if large)
 data/screenshots/
 
+# Ignore entire data directory (keep runtime files out of repo)
+data/
+
 # JetBrains
 .idea/

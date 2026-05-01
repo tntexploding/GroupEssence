@@ -16,13 +16,14 @@ pip install -r requirements.txt
 ```
 
 如果你希望通过 OCR 处理中文，请额外安装 Tesseract，并配置中文语言包 `chi_sim`。
+可能需要更改python设置，以便在虚拟环境中使用环境变量中的Tesseract。
 
 ## 2. 配置
 
 复制配置：
 
 ```powershell
-copy .env.example .env
+copy example.env .env
 ```
 
 关键配置项：
@@ -53,28 +54,28 @@ python -m group_essence_extractor.cli ingest
 按发送时间/精华时间搜索：
 
 ```powershell
-python -m group_essence_extractor.cli search --sender-time "2026-04-23"
-python -m group_essence_extractor.cli search --essence-time "2026-04-23"
+python -m group_essence_extractor.cli search --sender-time "2026-05-01"
+python -m group_essence_extractor.cli search --essence-time "2026-05-01"
 ```
 
 按发送人/设置人搜索：
 
 ```powershell
-python -m group_essence_extractor.cli search --sender "张三"
-python -m group_essence_extractor.cli search --operator "管理员A"
+python -m group_essence_extractor.cli search --sender "咕咕嘎嘎"
+python -m group_essence_extractor.cli search --operator "管理员"
 ```
 
 按 QQ 号搜索（精确匹配）：
 
 ```powershell
-python -m group_essence_extractor.cli search --sender-qq "12345678"
-python -m group_essence_extractor.cli search --operator-qq "87654321"
+python -m group_essence_extractor.cli search --sender-qq "114514"
+python -m group_essence_extractor.cli search --operator-qq "1919810"
 ```
 
 按内容搜索（图片精华走 OCR 文本匹配）：
 
 ```powershell
-python -m group_essence_extractor.cli search --content "活动通知"
+python -m group_essence_extractor.cli search --content "不赖"
 ```
 
 ### 3.4 远程搜索接口
@@ -142,6 +143,8 @@ Content-Type: application/json
 - OneBot 适配采用 `POST /get_essence_msg_list`。
 - OCR 回退会扫描 `data/screenshots` 下的图片，先做全文 OCR，再用规则抽取字段。
 - 图片型精华消息会将图片路径和 OCR 文本共同入库，检索时匹配 `content_search` 字段。
+- 推荐采用onebot入库方式，目前尚未测试大量使用OCR入库是否能正常运行。
+- 图片类精华消息会以URL形式给出。
 
 ## 5. 后续可增强
 
@@ -149,3 +152,4 @@ Content-Type: application/json
 - 对 OneBot 图片 URL 自动下载并单图 OCR
 - 内容检索升级为 FTS5 全文索引
 - 增加请求签名/鉴权，安全接入外部 API 服务器
+- 验证仅OCR进行大范围识别入库的可行性与稳定性
