@@ -3,4 +3,6 @@
 
 # Don't include large data in archive exports
 data/screenshots/** export-ignore
-data/**/ *.db export-ignore
+# ignore database files in export
+data/*.db export-ignore
+data/*.sqlite export-ignore
