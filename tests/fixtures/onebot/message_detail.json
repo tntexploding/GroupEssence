@@ -1,0 +1,26 @@
+{
+  "status": "ok",
+  "retcode": 0,
+  "data": {
+    "time": 1700000000000,
+    "group_id": "123456",
+    "sender": {
+      "user_id": "10001",
+      "nickname": "测试发送者"
+    },
+    "message": [
+      {
+        "type": "text",
+        "data": {
+          "text": "脱敏契约测试消息"
+        }
+      },
+      {
+        "type": "image",
+        "data": {
+          "url": "https://example.invalid/fixture.png"
+        }
+      }
+    ]
+  }
+}

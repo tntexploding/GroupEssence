@@ -105,6 +105,9 @@ class ApiAndCliTests(unittest.TestCase):
     def test_cli_parser_exposes_expected_commands(self) -> None:
         parser = build_parser()
         self.assertEqual(parser.parse_args(["init-db"]).command, "init-db")
+        self.assertEqual(parser.parse_args(["doctor"]).command, "doctor")
+        self.assertEqual(parser.parse_args(["audit-db"]).command, "audit-db")
+        self.assertTrue(parser.parse_args(["ingest", "--dry-run"]).dry_run)
         search = parser.parse_args(["search", "--content", "活动", "--limit", "20"])
         self.assertEqual(search.command, "search")
         self.assertEqual(search.content, "活动")

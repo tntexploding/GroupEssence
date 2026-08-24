@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "retcode": 0,
+  "data": [
+    {
+      "sender_id": "10001",
+      "sender_nick": "测试发送者",
+      "operator_id": "10002",
+      "operator_nick": "测试管理员",
+      "operator_time": 1700000100,
+      "message_id": "contract-message-1"
+    }
+  ]
+}

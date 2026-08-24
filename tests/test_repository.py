@@ -91,6 +91,28 @@ class EssenceRepositoryTests(unittest.TestCase):
         self.repo.upsert_messages([make_message()])
         self.assertEqual(len(self.repo.search(limit=0, offset=-10)), 1)
 
+    def test_audit_is_read_only_and_reports_quality(self) -> None:
+        self.repo.upsert_messages([make_message(), make_message(message_id="message-2", group_id="")])
+        modified_before = self.db_path.stat().st_mtime_ns
+
+        report = self.repo.audit()
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["integrity"], "ok")
+        self.assertEqual(report["total"], 2)
+        self.assertEqual(report["by_source"], {"onebot": 2})
+        self.assertEqual(report["missing"]["group_id"], 1)
+        self.assertEqual(report["duplicates"]["message_identity"], 0)
+        self.assertEqual(self.db_path.stat().st_mtime_ns, modified_before)
+
+    def test_audit_missing_database_does_not_create_paths(self) -> None:
+        missing_path = Path(self.temp_dir.name) / "missing" / "database.db"
+        report = EssenceRepository(missing_path).audit()
+
+        self.assertEqual(report["status"], "error")
+        self.assertFalse(missing_path.exists())
+        self.assertFalse(missing_path.parent.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

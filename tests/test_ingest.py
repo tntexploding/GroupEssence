@@ -43,6 +43,25 @@ def make_message(source: str = "onebot") -> EssenceMessage:
 
 
 class IngestTests(unittest.TestCase):
+    def test_dry_run_collects_quality_without_creating_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = make_settings(root)
+            client = MagicMock()
+            client.__enter__.return_value = client
+            client.__exit__.return_value = None
+            client.get_essence_messages.return_value = [make_message()]
+
+            with patch("group_essence_extractor.ingest.OneBotClient", return_value=client):
+                stats = ingest_all(settings, dry_run=True)
+
+            self.assertTrue(stats["dry_run"])
+            self.assertEqual(stats["collected"], 1)
+            self.assertEqual(stats["quality"]["total"], 1)
+            self.assertEqual(stats["quality"]["missing"]["sender_time"], 0)
+            self.assertEqual(stats["inserted"], 0)
+            self.assertFalse(settings.db_path.exists())
+
     def test_onebot_result_skips_ocr_and_is_saved(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

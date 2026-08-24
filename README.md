@@ -13,6 +13,7 @@
 - 按时间、昵称、QQ 号或正文进行本地搜索。
 - 提供健康检查、触发采集和远程搜索 API。
 - 使用稳定消息标识更新已有记录，重复采集不会无条件追加副本。
+- 提供不联网的环境诊断、不写库采集预检和只读数据库审计。
 
 ## 运行要求
 
@@ -88,6 +89,15 @@ Copy-Item example.env .env
 
 ## 使用
 
+### 检查运行条件
+
+```powershell
+essence doctor
+```
+
+该命令检查 Python、数据库目录、OneBot 必填参数、Tesseract 和截图目录，但不会
+连接 OneBot，也不会创建数据库或其他文件。`status=error` 时命令返回非零退出码。
+
 ### 初始化数据库
 
 ```powershell
@@ -95,6 +105,17 @@ essence init-db
 ```
 
 ### 执行一次采集
+
+首次连接远端 OneBot 时，建议先进行不写库预检：
+
+```powershell
+essence ingest --dry-run
+```
+
+`--dry-run` 会执行真实来源读取和标准化，但不初始化或写入数据库，也不会在输出中
+包含消息正文；它只报告来源数量、字段缺失、详情补全错误和待 OCR 图片数量。
+
+确认质量统计后再正式写入：
 
 ```powershell
 essence ingest
@@ -104,10 +125,20 @@ essence ingest
 
 ```json
 {
+  "dry_run": false,
+  "collected": 12,
   "from_onebot": 12,
   "onebot_error": "",
   "from_ocr": 0,
   "ocr_error_count": 0,
+  "quality": {
+    "total": 12,
+    "by_source": {"onebot": 12},
+    "by_content_type": {"image": 2, "text": 10},
+    "missing": {"group_id": 0, "sender_time": 0},
+    "detail_errors": 0,
+    "images_without_ocr": 2
+  },
   "inserted": 2,
   "updated": 10,
   "unchanged": 0
@@ -116,6 +147,15 @@ essence ingest
 
 OneBot 记录使用来源、群号和消息 ID 识别已有数据；OCR 记录使用截图内容的
 SHA-256 指纹，并兼容按原截图路径更新旧记录。
+
+### 审计现有数据库
+
+```powershell
+essence audit-db
+```
+
+审计使用 SQLite 只读连接，不创建或修改数据库。输出包含快速完整性检查、记录总数、
+来源与内容类型分布、空字段、重复身份以及发送/精华时间范围。
 
 ### 本地搜索
 
@@ -181,7 +221,7 @@ example.env                   可提交的配置模板
 ```
 
 运行数据的详细规则见 `data/README.md`，内部模块和数据流见
-`docs/ARCHITECTURE.md`。
+`docs/ARCHITECTURE.md`。远端 NapCat 验收步骤见 `docs/REMOTE_VALIDATION.md`。
 
 ## 开发与测试
 
@@ -191,6 +231,9 @@ example.env                   可提交的配置模板
 python -m unittest discover -s tests -v
 python -m pip check
 ```
+
+其中 OneBot 契约测试会在本机随机端口启动临时 HTTP 服务，读取
+`tests/fixtures/onebot/` 下的脱敏响应；不会访问真实 OneBot 或互联网。
 
 贡献流程、测试夹具和隐私要求见 `CONTRIBUTING.md`。GitHub Actions 会在受支持的
 最低 Python 3.10 和当前开发环境 Python 3.14 上执行相同测试。

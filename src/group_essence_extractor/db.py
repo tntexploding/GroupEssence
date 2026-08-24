@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 import sqlite3
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .models import EssenceMessage
 
@@ -80,18 +80,135 @@ class SaveStats:
 class EssenceRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    def _connect(self, read_only: bool = False) -> sqlite3.Connection:
+        if read_only:
+            uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+        else:
+            conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def init_db(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn, conn:
             conn.execute(CREATE_TABLE_SQL)
             for sql in CREATE_INDEX_SQL:
                 conn.execute(sql)
+
+    def audit(self) -> dict[str, Any]:
+        """以只读连接汇总数据质量，不创建或修改数据库。"""
+        if not self.db_path.is_file():
+            return {
+                "status": "error",
+                "database": str(self.db_path),
+                "error": "数据库文件不存在",
+            }
+
+        try:
+            with closing(self._connect(read_only=True)) as conn:
+                table_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_messages'"
+                ).fetchone()
+                if table_exists is None:
+                    return {
+                        "status": "error",
+                        "database": str(self.db_path),
+                        "error": "数据库缺少 essence_messages 表",
+                    }
+
+                integrity = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+                total = int(conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0])
+                missing = {
+                    field: int(
+                        conn.execute(
+                            f"""
+                            SELECT COUNT(*) FROM essence_messages
+                            WHERE {field} IS NULL OR TRIM(CAST({field} AS TEXT)) = ''
+                            """
+                        ).fetchone()[0]
+                    )
+                    for field in (
+                        "group_id",
+                        "message_id",
+                        "sender",
+                        "sender_id",
+                        "sender_time",
+                        "essence_time",
+                        "operator",
+                        "operator_id",
+                        "content_text",
+                    )
+                }
+                duplicate_message_identities = int(
+                    conn.execute(
+                        """
+                        SELECT COALESCE(SUM(count_per_identity - 1), 0)
+                        FROM (
+                            SELECT COUNT(*) AS count_per_identity
+                            FROM essence_messages
+                            WHERE message_id IS NOT NULL AND TRIM(message_id) <> ''
+                            GROUP BY source, group_id, message_id
+                            HAVING COUNT(*) > 1
+                        )
+                        """
+                    ).fetchone()[0]
+                )
+                duplicate_ocr_paths = int(
+                    conn.execute(
+                        """
+                        SELECT COALESCE(SUM(count_per_path - 1), 0)
+                        FROM (
+                            SELECT COUNT(*) AS count_per_path
+                            FROM essence_messages
+                            WHERE source = 'ocr_screenshot'
+                              AND image_path IS NOT NULL
+                              AND TRIM(image_path) <> ''
+                            GROUP BY group_id, image_path
+                            HAVING COUNT(*) > 1
+                        )
+                        """
+                    ).fetchone()[0]
+                )
+                sender_range = conn.execute(
+                    "SELECT MIN(NULLIF(sender_time, '')), MAX(NULLIF(sender_time, '')) FROM essence_messages"
+                ).fetchone()
+                essence_range = conn.execute(
+                    "SELECT MIN(NULLIF(essence_time, '')), MAX(NULLIF(essence_time, '')) FROM essence_messages"
+                ).fetchone()
+
+                return {
+                    "status": "ok" if integrity == "ok" else "error",
+                    "database": str(self.db_path),
+                    "size_bytes": self.db_path.stat().st_size,
+                    "integrity": integrity,
+                    "total": total,
+                    "by_source": self._count_by(conn, "source"),
+                    "by_content_type": self._count_by(conn, "content_type"),
+                    "missing": missing,
+                    "duplicates": {
+                        "message_identity": duplicate_message_identities,
+                        "ocr_image_path": duplicate_ocr_paths,
+                    },
+                    "time_ranges": {
+                        "sender_time": {"min": sender_range[0], "max": sender_range[1]},
+                        "essence_time": {"min": essence_range[0], "max": essence_range[1]},
+                    },
+                }
+        except sqlite3.Error as exc:
+            return {
+                "status": "error",
+                "database": str(self.db_path),
+                "error": str(exc),
+            }
+
+    @staticmethod
+    def _count_by(conn: sqlite3.Connection, column: str) -> dict[str, int]:
+        rows = conn.execute(
+            f"SELECT COALESCE({column}, ''), COUNT(*) FROM essence_messages GROUP BY {column}"
+        ).fetchall()
+        return {str(row[0]): int(row[1]) for row in rows}
 
     def upsert_messages(self, messages: Iterable[EssenceMessage]) -> SaveStats:
         insert_sql = """
