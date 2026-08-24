@@ -5,6 +5,7 @@
 - `group_essence.db`：默认 SQLite 数据库。
 - `screenshots/`：等待 OCR 导入的 QQ 精华消息截图。
 - `images/`：后续下载或生成的消息图片资源。
+- `exports/`：通过 `essence export` 生成的 JSON/CSV 文件。
 
 请勿在这里存放需要随源码发布的资源。可公开、已脱敏的测试样本应放在
 `tests/fixtures/`，文档配图应放在 `docs/assets/`。令牌、账号配置等敏感信息只应

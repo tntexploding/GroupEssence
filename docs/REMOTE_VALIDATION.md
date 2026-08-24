@@ -55,10 +55,20 @@ essence ingest --dry-run
 
 ```powershell
 essence audit-db
+essence repair-db
 ```
 
-记录总数、空字段和重复身份数量。如果数据库包含重要数据，可以在首次远端写入前做
-一次人工备份，但不要反复生成测试存档。
+记录 schema 版本、总数、空字段和重复身份数量。`repair-db` 此时只读预览；重点核对
+`would_update`、各字段 `candidates` 和 `unresolved`。如确实要补全旧数据，确认数据库
+已有一次可恢复备份后再执行：
+
+```powershell
+essence repair-db --apply
+```
+
+只有原始响应和 `.env` 都没有群号时，才需要显式传入
+`--group-id "目标群号"`。不要反复生成测试存档，也不要将数据库或预览之外的原始
+数据复制回源码仓库。
 
 ## 5. 正式采集与幂等验证
 
@@ -77,7 +87,9 @@ essence audit-db
 essence search --content "用于验收的脱敏关键字" --limit 10
 ```
 
-核对发送时间、精华时间、群号、用户 ID、正文类型和图片地址。
+核对 `total/count`、发送时间、精华时间、群号、用户 ID、正文类型和图片地址。若需
+验证范围查询，可追加 `--group-id`、`--source onebot` 和 `--essence-time-from`，无需
+为此创建额外数据库或导出文件。
 
 ## 6. 验收反馈
 

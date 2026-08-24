@@ -94,6 +94,8 @@ class ApiAndCliTests(unittest.TestCase):
             )
             self.assertEqual(result["request_id"], "req-1")
             self.assertEqual(result["count"], 1)
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["limit"], 100)
             self.assertEqual(result["items"][0]["content_text"], "活动通知")
 
     def test_search_query_validates_pagination(self) -> None:
@@ -107,11 +109,32 @@ class ApiAndCliTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["init-db"]).command, "init-db")
         self.assertEqual(parser.parse_args(["doctor"]).command, "doctor")
         self.assertEqual(parser.parse_args(["audit-db"]).command, "audit-db")
+        self.assertFalse(parser.parse_args(["repair-db"]).apply)
+        self.assertTrue(parser.parse_args(["repair-db", "--apply"]).apply)
         self.assertTrue(parser.parse_args(["ingest", "--dry-run"]).dry_run)
-        search = parser.parse_args(["search", "--content", "活动", "--limit", "20"])
+        search = parser.parse_args(
+            [
+                "search",
+                "--content",
+                "活动",
+                "--group-id",
+                "123456",
+                "--sender-time-from",
+                "2026-05-01",
+                "--limit",
+                "20",
+            ]
+        )
         self.assertEqual(search.command, "search")
         self.assertEqual(search.content, "活动")
+        self.assertEqual(search.group_id, "123456")
+        self.assertEqual(search.sender_time_from, "2026-05-01")
         self.assertEqual(search.limit, 20)
+        export = parser.parse_args(
+            ["export", "--format", "json", "--output", "records.json", "--max-records", "10"]
+        )
+        self.assertEqual(export.command, "export")
+        self.assertEqual(export.max_records, 10)
 
 
 if __name__ == "__main__":

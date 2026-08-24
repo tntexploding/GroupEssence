@@ -14,6 +14,8 @@
 - 提供健康检查、触发采集和远程搜索 API。
 - 使用稳定消息标识更新已有记录，重复采集不会无条件追加副本。
 - 提供不联网的环境诊断、不写库采集预检和只读数据库审计。
+- 使用显式数据库版本迁移，并可预览或修复旧记录中的可恢复字段。
+- 支持来源、群号、内容类型、时间范围筛选以及 JSON/CSV 导出。
 
 ## 运行要求
 
@@ -104,6 +106,10 @@ essence doctor
 essence init-db
 ```
 
+初始化会按 `PRAGMA user_version` 依次执行幂等迁移。输出中的 `from_version`、
+`to_version` 和 `applied` 可用于确认本次实际执行了哪些迁移；程序不会打开高于当前
+支持版本的数据库。
+
 ### 执行一次采集
 
 首次连接远端 OneBot 时，建议先进行不写库预检：
@@ -155,7 +161,26 @@ essence audit-db
 ```
 
 审计使用 SQLite 只读连接，不创建或修改数据库。输出包含快速完整性检查、记录总数、
-来源与内容类型分布、空字段、重复身份以及发送/精华时间范围。
+数据库版本、来源与内容类型分布、空字段、重复身份以及发送/精华时间范围。
+
+### 预览和修复旧数据
+
+默认命令只读扫描，不修改数据库：
+
+```powershell
+essence repair-db
+```
+
+它会尝试从已保存的 `raw_json` 恢复缺失的群号、消息 ID、发送时间和精华时间，并
+重建正文搜索字段。输出只包含候选数、无法恢复数和待更新行数，不包含消息正文。
+确认预览后才显式写入：
+
+```powershell
+essence repair-db --apply
+```
+
+缺失群号的 OneBot 旧记录会优先使用原始响应；原始响应也没有群号时，使用
+`--group-id` 或配置中的 `GROUP_ID`。无法确定的字段会保留原状并计入 `unresolved`。
 
 ### 本地搜索
 
@@ -167,11 +192,29 @@ essence search --sender-qq "10001"
 essence search --operator "管理员"
 essence search --operator-qq "10002"
 essence search --content "活动通知"
+essence search --group-id "123456" --source onebot --content-type mixed
+essence search --sender-time-from "2026-05-01 00:00:00" --sender-time-to "2026-05-31 23:59:59"
+essence search --essence-time-from "2026-05-01" --essence-time-to "2026-06-01"
 essence search --content "活动" --limit 20 --offset 0
 ```
 
-多个搜索条件同时出现时按 AND 组合。昵称和正文使用包含匹配，QQ 号使用精确
-匹配；结果默认按精华时间倒序排列，单次最多返回 1000 条。
+多个搜索条件同时出现时按 AND 组合。昵称、正文和单个时间文本使用包含匹配；QQ
+号、群号、来源和内容类型使用精确匹配；`*-from` / `*-to` 使用闭区间。结果默认按
+精华时间倒序排列，单次最多返回 1000 条。CLI 输出包含 `total`、当前页 `count`、
+`limit`、`offset` 和 `items`。
+
+### 导出搜索结果
+
+```powershell
+essence export --format json --output ./data/exports/essence.json
+essence export --format csv --output ./data/exports/essence.csv --group-id "123456"
+essence export --format json --output ./data/exports/recent.json `
+  --essence-time-from "2026-05-01" --max-records 500
+```
+
+导出复用全部搜索筛选条件。JSON 使用 UTF-8，CSV 使用带 BOM 的 UTF-8 以方便表格
+软件识别中文。已有文件默认不会被覆盖；确认后添加 `--force`。导出路径不能指向
+当前 SQLite 数据库。
 
 ### HTTP API
 
@@ -199,11 +242,16 @@ Content-Type: application/json
     "sender_time": "2026-05-01",
     "sender": "张三",
     "content": "活动",
+    "group_id": "123456",
+    "source": "onebot",
+    "essence_time_from": "2026-05-01 00:00:00",
     "limit": 50,
     "offset": 0
   }
 }
 ```
+
+响应中的 `total` 是筛选后的总记录数，`count` 是当前页条数，便于客户端可靠分页。
 
 当前 API 没有应用层鉴权。如需监听 `0.0.0.0`，应先在可信网络、反向代理或其他
 访问控制之后部署，不建议直接暴露到公网。
@@ -214,7 +262,7 @@ Content-Type: application/json
 src/group_essence_extractor/  Python 包与运行逻辑
 tests/                        自动测试；公开且脱敏的夹具放 tests/fixtures/
 docs/                         架构与开发补充文档；配图放 docs/assets/
-data/                         本地数据库、待识别截图和下载图片（不提交）
+data/                         本地数据库、截图、下载图片和导出文件（不提交）
 .github/                      CI 与 Issue 模板
 example.env                   可提交的配置模板
 .env                          本地配置和密钥（不提交）

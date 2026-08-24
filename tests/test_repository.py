@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
-from group_essence_extractor.db import EssenceRepository, SaveStats
+from group_essence_extractor.db import (
+    CREATE_TABLE_SQL,
+    SCHEMA_VERSION,
+    EssenceRepository,
+    MigrationStats,
+    SaveStats,
+)
 from group_essence_extractor.models import EssenceMessage
 
 
@@ -52,6 +60,38 @@ class EssenceRepositoryTests(unittest.TestCase):
         self.assertEqual(rows[0]["sender_time"], "2026-05-01 09:59:59")
         self.assertEqual(rows[0]["content_text"], "更新后的活动通知")
 
+    def test_schema_migration_is_versioned_and_idempotent(self) -> None:
+        self.assertEqual(
+            self.repo.init_db(),
+            MigrationStats(from_version=SCHEMA_VERSION, to_version=SCHEMA_VERSION),
+        )
+
+        legacy_path = Path(self.temp_dir.name) / "legacy.db"
+        with closing(sqlite3.connect(legacy_path)) as conn, conn:
+            conn.execute(CREATE_TABLE_SQL)
+            conn.execute(
+                """
+                INSERT INTO essence_messages (
+                    sender, sender_time, essence_time, operator, content_text,
+                    content_type, content_search, source
+                ) VALUES ('旧用户', '', '', '旧管理员', '旧消息', 'text', '旧消息', 'onebot')
+                """
+            )
+        migration = EssenceRepository(legacy_path).init_db()
+
+        self.assertEqual(migration, MigrationStats(from_version=0, to_version=1, applied=(1,)))
+        with closing(sqlite3.connect(legacy_path)) as conn:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0], 1)
+
+    def test_rejects_database_newer_than_supported_schema(self) -> None:
+        future_path = Path(self.temp_dir.name) / "future.db"
+        with closing(sqlite3.connect(future_path)) as conn, conn:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+        with self.assertRaisesRegex(RuntimeError, "高于程序支持"):
+            EssenceRepository(future_path).init_db()
+
     def test_backfills_group_id_on_legacy_onebot_record(self) -> None:
         legacy = make_message(group_id="", sender_time="")
         self.assertEqual(self.repo.insert_messages([legacy]), 1)
@@ -91,6 +131,79 @@ class EssenceRepositoryTests(unittest.TestCase):
         self.repo.upsert_messages([make_message()])
         self.assertEqual(len(self.repo.search(limit=0, offset=-10)), 1)
 
+    def test_search_page_supports_exact_ranges_and_total(self) -> None:
+        self.repo.upsert_messages(
+            [
+                make_message(message_id="1", content_type="text"),
+                make_message(
+                    message_id="2",
+                    sender_time="2026-05-02 10:00:00",
+                    essence_time="2026-05-02 10:05:00",
+                    content_type="mixed",
+                ),
+                make_message(
+                    message_id="3",
+                    group_id="other",
+                    sender_time="2026-05-03 10:00:00",
+                    essence_time="2026-05-03 10:05:00",
+                ),
+            ]
+        )
+
+        page = self.repo.search_page(
+            group_id="123456",
+            source="onebot",
+            sender_time_from="2026-05-01 00:00:00",
+            sender_time_to="2026-05-02 23:59:59",
+            limit=1,
+        )
+
+        self.assertEqual(page.total, 2)
+        self.assertEqual(len(page.items), 1)
+        self.assertEqual(page.items[0]["message_id"], "2")
+        self.assertEqual(
+            self.repo.search(content_type="mixed", group_id="123456")[0]["message_id"],
+            "2",
+        )
+
+    def test_repair_previews_read_only_then_applies_recoverable_fields(self) -> None:
+        legacy = make_message(
+            group_id="",
+            message_id="",
+            sender_time="",
+            essence_time="",
+            content_text="修复正文",
+        )
+        legacy.raw_data = {
+            "essence": {
+                "group_id": "123456",
+                "message_id": "legacy-1",
+                "operator_time": "2026-05-01 10:05:00",
+            },
+            "message_detail": {"time": "2026-05-01 10:00:00"},
+        }
+        self.repo.upsert_messages([legacy])
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE essence_messages SET content_search = '过期索引'")
+        modified_before = self.db_path.stat().st_mtime_ns
+
+        preview = self.repo.repair()
+
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["would_update"], 1)
+        self.assertEqual(preview["candidates"]["sender_time"], 1)
+        self.assertEqual(preview["candidates"]["content_search"], 1)
+        self.assertEqual(preview["updated"], 0)
+        self.assertEqual(self.db_path.stat().st_mtime_ns, modified_before)
+
+        applied = self.repo.repair(apply=True)
+        row = self.repo.search(content="修复正文")
+        self.assertEqual(applied["updated"], 1)
+        self.assertEqual(row[0]["group_id"], "123456")
+        self.assertEqual(row[0]["message_id"], "legacy-1")
+        self.assertEqual(row[0]["sender_time"], "2026-05-01 10:00:00")
+        self.assertEqual(row[0]["essence_time"], "2026-05-01 10:05:00")
+
     def test_audit_is_read_only_and_reports_quality(self) -> None:
         self.repo.upsert_messages([make_message(), make_message(message_id="message-2", group_id="")])
         modified_before = self.db_path.stat().st_mtime_ns
@@ -99,6 +212,8 @@ class EssenceRepositoryTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["integrity"], "ok")
+        self.assertEqual(report["schema_version"], SCHEMA_VERSION)
+        self.assertFalse(report["migration_required"])
         self.assertEqual(report["total"], 2)
         self.assertEqual(report["by_source"], {"onebot": 2})
         self.assertEqual(report["missing"]["group_id"], 1)
