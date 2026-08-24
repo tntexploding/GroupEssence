@@ -9,6 +9,7 @@
 - 支持 NapCat / go-cqhttp 兼容的 `get_essence_msg_list` 接口。
 - 精华列表缺少发送时间或正文时，通过 `get_msg` 补全单条消息。
 - OneBot 失败或没有数据时，可扫描截图目录并使用 Tesseract OCR。
+- 可在不连接 NapCat、不创建数据库的情况下预览截图 OCR 质量。
 - 保存发送者、发送时间、精华时间、设置人、正文、图片地址和原始响应。
 - 按时间、昵称、QQ 号或正文进行本地搜索。
 - 提供健康检查、触发采集和远程搜索 API。
@@ -17,6 +18,7 @@
 - 使用显式数据库版本迁移，并可预览或修复旧记录中的可恢复字段。
 - 支持来源、群号、内容类型、时间范围筛选以及 JSON/CSV 导出。
 - 可将 OneBot 图片按内容哈希下载到本地、执行 OCR，并纳入正文搜索。
+- OCR 默认识别原图，仅在结果为空或低置信度时尝试一次轻量灰度放大兜底。
 
 ## 运行要求
 
@@ -110,6 +112,25 @@ essence doctor --images
 
 该模式还会检查 Tesseract 和 `IMAGE_DIR` 的可写条件，仍然不会联网或创建目录。
 
+### 离线预览截图 OCR
+
+NapCat 暂不可用时，可以独立验证截图识别与字段解析：
+
+```powershell
+essence ocr-preview
+essence ocr-preview --screenshot-dir ./data/screenshots --group-id "123456" --limit 10
+```
+
+该命令扫描 PNG、JPEG 和 WebP，最多处理 `--limit` 张截图；默认目录来自
+`SCREENSHOT_DIR`。它会先识别校正方向后的原图，只有原图无文字或平均置信度低于
+阈值时，才额外尝试一次三倍灰度放大，并选择质量更好的结果。解析器支持带
+“发送者/发送时间”等标签的文本，也支持 QQ 精华卡片常见的“昵称、元数据、正文”
+三段布局。
+
+输出只包含候选数、处理数、错误数、字段缺失、平均置信度及识别/解析策略分布，
+不会包含截图文件名、昵称、正文，也不会初始化或写入数据库。`status=warning`
+表示至少一张截图失败，其余成功结果仍会进入质量统计。
+
 ### 初始化数据库
 
 ```powershell
@@ -153,7 +174,14 @@ essence ingest
     "by_content_type": {"image": 2, "text": 10},
     "missing": {"group_id": 0, "sender_time": 0},
     "detail_errors": 0,
-    "images_without_ocr": 2
+    "images_without_ocr": 2,
+    "ocr_quality": {
+      "records": 0,
+      "structured_complete": 0,
+      "mean_confidence": null,
+      "by_parser_profile": {},
+      "by_recognition_profile": {}
+    }
   },
   "inserted": 2,
   "updated": 10,
@@ -325,7 +353,8 @@ python -m pip check
 
 ## 已知限制
 
-- 截图 OCR 仍是整图识别加规则提取，复杂界面或低清图片的字段准确率有限。
+- 截图 OCR 尚未进行界面区域分割；未覆盖的卡片布局、严重裁切或低清图片仍可能需要
+  新增解析策略。
 - 已失效或需要额外登录态的 OneBot 图片地址会记录为失败，需在可访问图片的环境重试。
 - 正文检索使用 SQLite `LIKE`，数据量较大时可升级为 FTS5。
 - OneBot 不同实现的返回字段可能存在差异；补全逻辑目前面向标准

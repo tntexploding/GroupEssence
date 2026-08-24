@@ -3,7 +3,7 @@
 `data/` 只用于本地运行数据，除本说明外均不纳入 Git。
 
 - `group_essence.db`：默认 SQLite 数据库。
-- `screenshots/`：等待 OCR 导入的 QQ 精华消息截图。
+- `screenshots/`：等待 OCR 导入的 QQ 精华消息截图；可先用 `ocr-preview` 做只读预检。
 - `images/`：OneBot 图片的 SHA-256 去重缓存，由 `enrich-images --apply` 管理。
 - `exports/`：通过 `essence export` 生成的 JSON/CSV 文件。
 

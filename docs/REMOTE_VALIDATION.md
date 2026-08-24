@@ -39,6 +39,20 @@ essence doctor
 essence doctor --images
 ```
 
+### NapCat 不可用时先验证截图 OCR
+
+截图 OCR 与 OneBot 连接相互独立，可在本地或远端先执行：
+
+```powershell
+essence ocr-preview --screenshot-dir ./data/screenshots --group-id "目标群号" --limit 10
+```
+
+该命令不会创建或写入数据库，也不会输出截图名、昵称或正文。重点检查
+`ocr_error_count`、`quality.missing`、`quality.ocr_quality.structured_complete`、
+`mean_confidence` 和两类策略分布。QQ 精华卡片通常应进入
+`qq_essence_card` 解析策略；只有低置信度图片才应进入 `scale3_gray` 识别策略。
+截图属于 `data/` 下的本地运行数据，验收后无需移动到测试夹具或提交到 Git。
+
 ## 3. 不写库采集预检
 
 ```powershell

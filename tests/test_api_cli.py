@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import redirect_stdout
 from io import StringIO
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -123,6 +124,11 @@ class ApiAndCliTests(unittest.TestCase):
         self.assertEqual(enrich.group_id, "123456")
         self.assertEqual(enrich.limit, 5)
         self.assertTrue(parser.parse_args(["ingest", "--dry-run"]).dry_run)
+        ocr_preview = parser.parse_args(
+            ["ocr-preview", "--screenshot-dir", "screenshots", "--limit", "5"]
+        )
+        self.assertEqual(ocr_preview.command, "ocr-preview")
+        self.assertEqual(ocr_preview.limit, 5)
         search = parser.parse_args(
             [
                 "search",
@@ -154,6 +160,56 @@ class ApiAndCliTests(unittest.TestCase):
                 StringIO()
             ):
                 exit_code = main(["enrich-images", "--apply", "--limit", "0"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(settings.db_path.exists())
+
+    def test_ocr_preview_reports_aggregate_quality_without_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = make_settings(root)
+            settings.screenshot_dir.mkdir()
+            (settings.screenshot_dir / "card.png").write_bytes(b"mocked")
+            message = EssenceMessage(
+                sender="测试用户",
+                sender_time="2026-05-01",
+                essence_time="2026-05-02",
+                operator="管理员",
+                content_text="正文",
+                image_path="card.png",
+                ocr_text="OCR 正文",
+                group_id="123456",
+                message_id="ocr:abc",
+                source="ocr_screenshot",
+                raw_data={
+                    "parser_profile": "qq_essence_card",
+                    "ocr_profile": "original",
+                    "ocr_mean_confidence": 75.0,
+                },
+            )
+            output = StringIO()
+            with patch(
+                "group_essence_extractor.cli.get_settings", return_value=settings
+            ), patch(
+                "group_essence_extractor.cli.ingest_from_screenshots",
+                return_value=([message], 0),
+            ), redirect_stdout(output):
+                exit_code = main(["ocr-preview", "--limit", "1"])
+
+            report = json.loads(output.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(report["candidates"], 1)
+            self.assertEqual(report["processed"], 1)
+            self.assertEqual(report["quality"]["ocr_quality"]["structured_complete"], 1)
+            self.assertFalse(settings.db_path.exists())
+
+    def test_invalid_ocr_preview_limit_does_not_initialize_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            settings = make_settings(Path(temp))
+            with patch(
+                "group_essence_extractor.cli.get_settings", return_value=settings
+            ), redirect_stdout(StringIO()):
+                exit_code = main(["ocr-preview", "--limit", "0"])
 
             self.assertEqual(exit_code, 1)
             self.assertFalse(settings.db_path.exists())

@@ -61,7 +61,7 @@ def ingest_all(
 
 def summarize_messages(messages: list[EssenceMessage]) -> dict[str, Any]:
     missing_fields = {
-        field: sum(not str(getattr(message, field, "") or "").strip() for message in messages)
+        field: sum(_field_is_missing(message, field) for message in messages)
         for field in (
             "group_id",
             "message_id",
@@ -74,6 +74,22 @@ def summarize_messages(messages: list[EssenceMessage]) -> dict[str, Any]:
             "content_text",
         )
     }
+    ocr_messages = [message for message in messages if message.source == "ocr_screenshot"]
+    ocr_confidences = [
+        confidence
+        for message in ocr_messages
+        if isinstance(
+            confidence := (message.raw_data or {}).get("ocr_mean_confidence"),
+            (int, float),
+        )
+    ]
+    structured_fields = (
+        "sender",
+        "sender_time",
+        "essence_time",
+        "operator",
+        "content_text",
+    )
     return {
         "total": len(messages),
         "by_source": dict(sorted(Counter(message.source for message in messages).items())),
@@ -87,7 +103,44 @@ def summarize_messages(messages: list[EssenceMessage]) -> dict[str, Any]:
         "images_without_ocr": sum(
             bool(message.image_path) and not bool(message.ocr_text) for message in messages
         ),
+        "ocr_quality": {
+            "records": len(ocr_messages),
+            "structured_complete": sum(
+                not any(_field_is_missing(message, field) for field in structured_fields)
+                for message in ocr_messages
+            ),
+            "mean_confidence": (
+                round(sum(ocr_confidences) / len(ocr_confidences), 2)
+                if ocr_confidences
+                else None
+            ),
+            "by_parser_profile": dict(
+                sorted(
+                    Counter(
+                        str((message.raw_data or {}).get("parser_profile") or "unknown")
+                        for message in ocr_messages
+                    ).items()
+                )
+            ),
+            "by_recognition_profile": dict(
+                sorted(
+                    Counter(
+                        str((message.raw_data or {}).get("ocr_profile") or "unknown")
+                        for message in ocr_messages
+                    ).items()
+                )
+            ),
+        },
     }
+
+
+def _field_is_missing(message: EssenceMessage, field: str) -> bool:
+    value = str(getattr(message, field, "") or "").strip()
+    if not value:
+        return True
+    return (field == "sender" and value == "未知发送者") or (
+        field == "operator" and value == "未知设置人"
+    )
 
 
 def ingest_from_screenshots(
@@ -95,24 +148,41 @@ def ingest_from_screenshots(
     ocr_lang: str,
     tesseract_cmd: str,
     group_id: str = "",
+    limit: int | None = None,
 ) -> tuple[list[EssenceMessage], int]:
-    if not screenshot_dir.exists():
-        return [], 0
+    if limit is not None and limit <= 0:
+        raise ValueError("OCR 预览数量必须大于 0")
 
     messages: list[EssenceMessage] = []
     error_count = 0
-    for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
-        for image_path in sorted(screenshot_dir.glob(ext)):
-            try:
-                messages.append(
-                    parse_screenshot_to_essence(
-                        image_path=image_path,
-                        ocr_lang=ocr_lang,
-                        tesseract_cmd=tesseract_cmd,
-                        group_id=group_id,
-                    )
+    candidates = list_screenshot_candidates(screenshot_dir)
+    if limit is not None:
+        candidates = candidates[:limit]
+    for image_path in candidates:
+        try:
+            messages.append(
+                parse_screenshot_to_essence(
+                    image_path=image_path,
+                    ocr_lang=ocr_lang,
+                    tesseract_cmd=tesseract_cmd,
+                    group_id=group_id,
                 )
-            except Exception:
-                error_count += 1
-                continue
+            )
+        except Exception:
+            error_count += 1
+            continue
     return messages, error_count
+
+
+def list_screenshot_candidates(screenshot_dir: Path) -> list[Path]:
+    if not screenshot_dir.is_dir():
+        return []
+    supported_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+    return sorted(
+        (
+            path
+            for path in screenshot_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in supported_suffixes
+        ),
+        key=lambda path: path.name.casefold(),
+    )

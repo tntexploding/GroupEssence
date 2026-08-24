@@ -15,7 +15,12 @@ from .image_enrichment import (
     enrich_images,
     validate_enrichment_options,
 )
-from .ingest import ingest_all
+from .ingest import (
+    ingest_all,
+    ingest_from_screenshots,
+    list_screenshot_candidates,
+    summarize_messages,
+)
 
 
 SEARCH_FILTERS = (
@@ -67,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init-db", help="初始化数据库")
     ingest = sub.add_parser("ingest", help="执行一次采集/入库")
     ingest.add_argument("--dry-run", action="store_true", help="采集并检查字段，但不写数据库")
+
+    ocr_preview = sub.add_parser("ocr-preview", help="离线识别截图并输出聚合质量报告")
+    ocr_preview.add_argument("--screenshot-dir", type=Path, help="截图目录；默认使用配置值")
+    ocr_preview.add_argument("--group-id", default="", help="为识别结果补充群号")
+    ocr_preview.add_argument("--limit", type=int, default=20, help="本次最多识别的截图数")
 
     doctor = sub.add_parser("doctor", help="检查本地配置和运行条件（不联网、不写文件）")
     doctor.add_argument("--images", action="store_true", help="同时检查图片补全所需条件")
@@ -124,6 +134,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest" and args.dry_run:
         stat = ingest_all(settings, dry_run=True)
         print(json.dumps(stat, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "ocr-preview":
+        if args.limit <= 0:
+            print(
+                json.dumps(
+                    {"status": "error", "dry_run": True, "error": "OCR 预览数量必须大于 0"},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        screenshot_dir = (args.screenshot_dir or settings.screenshot_dir).resolve()
+        candidates = list_screenshot_candidates(screenshot_dir)
+        messages, error_count = ingest_from_screenshots(
+            screenshot_dir=screenshot_dir,
+            ocr_lang=settings.ocr_lang,
+            tesseract_cmd=settings.tesseract_cmd,
+            group_id=args.group_id or settings.group_id,
+            limit=args.limit,
+        )
+        report = {
+            "status": "warning" if error_count else "ok",
+            "dry_run": True,
+            "screenshot_dir": str(screenshot_dir),
+            "candidates": len(candidates),
+            "selected": min(len(candidates), args.limit),
+            "processed": len(messages) + error_count,
+            "collected": len(messages),
+            "ocr_error_count": error_count,
+            "quality": summarize_messages(messages),
+        }
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
 
     repo = EssenceRepository(settings.db_path)

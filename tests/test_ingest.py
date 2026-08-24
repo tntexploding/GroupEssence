@@ -7,8 +7,13 @@ from unittest.mock import MagicMock, patch
 
 from group_essence_extractor.config import Settings
 from group_essence_extractor.db import EssenceRepository
-from group_essence_extractor.ingest import ingest_all, ingest_from_screenshots
+from group_essence_extractor.ingest import (
+    ingest_all,
+    ingest_from_screenshots,
+    summarize_messages,
+)
 from group_essence_extractor.models import EssenceMessage
+from group_essence_extractor.ocr import OCRResult
 from group_essence_extractor.parsers import parse_screenshot_to_essence
 
 
@@ -148,8 +153,8 @@ class IngestTests(unittest.TestCase):
                 "精华时间：2026-05-01 10:05:00\n设置人：管理员\n正文"
             )
             with patch(
-                "group_essence_extractor.parsers.image_to_text",
-                return_value=ocr_text,
+                "group_essence_extractor.parsers.image_to_result",
+                return_value=OCRResult(ocr_text, 88.5, 9, "original"),
             ):
                 message = parse_screenshot_to_essence(
                     image_path,
@@ -162,7 +167,66 @@ class IngestTests(unittest.TestCase):
             self.assertTrue(message.message_id.startswith("ocr:"))
             self.assertEqual(len(message.message_id), 68)
             self.assertEqual(message.sender, "测试用户")
-            self.assertEqual(message.normalized_content_for_search(), ocr_text)
+            self.assertEqual(message.content_text, "正文")
+            self.assertEqual(message.raw_data["parser_profile"], "labeled")
+            self.assertEqual(message.raw_data["ocr_profile"], "original")
+            self.assertEqual(message.normalized_content_for_search(), f"正文\n{ocr_text}")
+
+    def test_screenshot_parser_understands_qq_essence_card_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            image_path = Path(temp) / "card.png"
+            image_path.write_bytes(b"qq-card")
+            ocr_text = (
+                "测 试 用 户\n"
+                "2026 年 5 月 1 日 · 2026 / 5 / 2 "
+                "由 管 理 员 设置为精华\n"
+                "活 动 通 知"
+            )
+            with patch(
+                "group_essence_extractor.parsers.image_to_result",
+                return_value=OCRResult(ocr_text, 76.25, 15, "original"),
+            ):
+                message = parse_screenshot_to_essence(
+                    image_path,
+                    "chi_sim+eng",
+                    "",
+                    group_id="123456",
+                )
+
+            self.assertEqual(message.sender, "测试用户")
+            self.assertEqual(message.sender_time, "2026-05-01")
+            self.assertEqual(message.essence_time, "2026-05-02")
+            self.assertEqual(message.operator, "管理员")
+            self.assertEqual(message.content_text, "活动通知")
+            self.assertEqual(message.raw_data["parser_profile"], "qq_essence_card")
+
+    def test_quality_counts_unknown_ocr_placeholders_as_missing(self) -> None:
+        message = EssenceMessage(
+            sender="未知发送者",
+            sender_time="",
+            essence_time="",
+            operator="未知设置人",
+            content_text="识别到的正文",
+            image_path="card.png",
+            ocr_text="识别到的正文",
+            source="ocr_screenshot",
+            raw_data={
+                "parser_profile": "fallback",
+                "ocr_profile": "scale3_gray",
+                "ocr_mean_confidence": 42.5,
+            },
+        )
+
+        quality = summarize_messages([message])
+
+        self.assertEqual(quality["missing"]["sender"], 1)
+        self.assertEqual(quality["missing"]["operator"], 1)
+        self.assertEqual(quality["ocr_quality"]["structured_complete"], 0)
+        self.assertEqual(quality["ocr_quality"]["mean_confidence"], 42.5)
+        self.assertEqual(
+            quality["ocr_quality"]["by_recognition_profile"],
+            {"scale3_gray": 1},
+        )
 
 
 if __name__ == "__main__":
