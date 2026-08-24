@@ -16,6 +16,7 @@
 - 提供不联网的环境诊断、不写库采集预检和只读数据库审计。
 - 使用显式数据库版本迁移，并可预览或修复旧记录中的可恢复字段。
 - 支持来源、群号、内容类型、时间范围筛选以及 JSON/CSV 导出。
+- 可将 OneBot 图片按内容哈希下载到本地、执行 OCR，并纳入正文搜索。
 
 ## 运行要求
 
@@ -85,6 +86,7 @@ Copy-Item example.env .env
 | `OCR_LANG` | `chi_sim+eng` | Tesseract 语言组合 |
 | `TESSERACT_CMD` | 空 | Tesseract 可执行文件或安装目录 |
 | `SCREENSHOT_DIR` | `./data/screenshots` | OCR 截图目录 |
+| `IMAGE_DIR` | `./data/images` | OneBot 图片附件的内容哈希缓存目录 |
 
 相对路径以启动命令时的当前目录为基准。`.env` 已被 Git 忽略，不能提交访问令牌
 等敏感信息。
@@ -99,6 +101,14 @@ essence doctor
 
 该命令检查 Python、数据库目录、OneBot 必填参数、Tesseract 和截图目录，但不会
 连接 OneBot，也不会创建数据库或其他文件。`status=error` 时命令返回非零退出码。
+
+准备执行图片补全时使用：
+
+```powershell
+essence doctor --images
+```
+
+该模式还会检查 Tesseract 和 `IMAGE_DIR` 的可写条件，仍然不会联网或创建目录。
 
 ### 初始化数据库
 
@@ -161,7 +171,8 @@ essence audit-db
 ```
 
 审计使用 SQLite 只读连接，不创建或修改数据库。输出包含快速完整性检查、记录总数、
-数据库版本、来源与内容类型分布、空字段、重复身份以及发送/精华时间范围。
+数据库版本、来源与内容类型分布、空字段、重复身份、发送/精华时间范围以及附件处理
+状态。schema v2 使用独立附件表，不改变原始 `image_path`。
 
 ### 预览和修复旧数据
 
@@ -181,6 +192,32 @@ essence repair-db --apply
 
 缺失群号的 OneBot 旧记录会优先使用原始响应；原始响应也没有群号时，使用
 `--group-id` 或配置中的 `GROUP_ID`。无法确定的字段会保留原状并计入 `unresolved`。
+
+### 补全图片内容
+
+先进行只读、离线预览：
+
+```powershell
+essence enrich-images
+essence enrich-images --group-id "123456" --limit 10
+```
+
+预览只解析数据库中已有的 OneBot 图片地址，报告待处理数、已完成数和不支持的地址；
+不会请求图片、运行 Tesseract、迁移数据库或创建缓存目录。确认 Tesseract 与统计后再
+显式执行：
+
+```powershell
+essence enrich-images --apply --limit 10
+```
+
+默认单张图片最大 20 MiB、请求超时 20 秒，可通过 `--max-bytes` 和 `--timeout`
+调整。图片保存在 `IMAGE_DIR/<哈希前缀>/<SHA-256>.<扩展名>`，不同消息引用相同内容
+时只保留一个文件。每个附件的远端地址、本地相对路径、哈希、大小、OCR 文本和状态
+记录在附件表中；成功 OCR 会合并到消息的 `ocr_text` 与 `content_search`。
+
+`completed` 和 `no_text` 不会重复处理；`failed` 会在下次执行时重试。若图片已经
+下载但 OCR 暂时失败，重试会直接使用缓存。命令输出只有聚合统计，不包含图片地址或
+OCR 正文。
 
 ### 本地搜索
 
@@ -262,7 +299,7 @@ Content-Type: application/json
 src/group_essence_extractor/  Python 包与运行逻辑
 tests/                        自动测试；公开且脱敏的夹具放 tests/fixtures/
 docs/                         架构与开发补充文档；配图放 docs/assets/
-data/                         本地数据库、截图、下载图片和导出文件（不提交）
+data/                         本地数据库、截图、哈希图片缓存和导出文件（不提交）
 .github/                      CI 与 Issue 模板
 example.env                   可提交的配置模板
 .env                          本地配置和密钥（不提交）
@@ -289,7 +326,7 @@ python -m pip check
 ## 已知限制
 
 - 截图 OCR 仍是整图识别加规则提取，复杂界面或低清图片的字段准确率有限。
-- OneBot 图片地址会保存，但尚未自动下载并逐图 OCR。
+- 已失效或需要额外登录态的 OneBot 图片地址会记录为失败，需在可访问图片的环境重试。
 - 正文检索使用 SQLite `LIKE`，数据量较大时可升级为 FTS5。
 - OneBot 不同实现的返回字段可能存在差异；补全逻辑目前面向标准
   `get_essence_msg_list` 与 `get_msg` 响应。

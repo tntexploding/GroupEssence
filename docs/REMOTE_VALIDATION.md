@@ -20,6 +20,7 @@ ONEBOT_BASE_URL=http://127.0.0.1:3000
 ONEBOT_ACCESS_TOKEN=
 GROUP_ID=目标群号
 PREFER_ONEBOT=true
+IMAGE_DIR=./data/images
 ```
 
 不要将远端 `.env`、数据库或真实响应提交到 Git。
@@ -32,6 +33,11 @@ essence doctor
 
 该命令不会联网。确认 Python、数据库路径和 OneBot 配置为 `ok`。如果远端不准备
 使用 OCR，可以设置 `FALLBACK_OCR=false`，避免 Tesseract 缺失影响诊断结果。
+准备验证 OneBot 图片 OCR 时，还需安装对应语言包并执行：
+
+```powershell
+essence doctor --images
+```
 
 ## 3. 不写库采集预检
 
@@ -91,7 +97,31 @@ essence search --content "用于验收的脱敏关键字" --limit 10
 验证范围查询，可追加 `--group-id`、`--source onebot` 和 `--essence-time-from`，无需
 为此创建额外数据库或导出文件。
 
-## 6. 验收反馈
+## 6. 图片补全小批量验收
+
+图片地址可能带短期签名，建议在正式采集后尽快预览：
+
+```powershell
+essence enrich-images --group-id "目标群号" --limit 10
+```
+
+预览不会请求图片或写库。确认 `discovered`、`pending` 和 `selected` 符合预期后，
+只处理一个小批次：
+
+```powershell
+essence enrich-images --apply --group-id "目标群号" --limit 10
+essence audit-db
+essence enrich-images --group-id "目标群号" --limit 10
+```
+
+第一次执行应产生 `downloaded` 以及 `ocr_completed`、`no_text` 或 `failed`；第二次
+预览中成功项应进入 `already_complete`。`audit-db.attachments` 应显示相同的状态分布。
+不要为了测试反复删除缓存；失败项再次执行会复用已成功下载的文件。
+
+若图片返回 403/404，记录状态即可，不要将真实 URL 带回本地。需要额外 Cookie 或
+登录态的图片源暂不在本轮兼容范围内。
+
+## 7. 验收反馈
 
 远端发现兼容差异时，建议只带回以下信息：
 
@@ -99,6 +129,7 @@ essence search --content "用于验收的脱敏关键字" --limit 10
 - action 名称；
 - HTTP 状态码和 OneBot `status/retcode`；
 - 脱敏后的 JSON 字段名及值类型；
-- `dry-run` 质量统计。
+- `dry-run` 质量统计；
+- 图片补全的聚合状态计数。
 
 不要带回访问令牌、Cookie、真实群号、QQ 号、昵称、消息正文或图片 URL。

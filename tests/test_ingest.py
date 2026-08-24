@@ -23,6 +23,7 @@ def make_settings(root: Path) -> Settings:
         ocr_lang="chi_sim+eng",
         tesseract_cmd="",
         screenshot_dir=root / "screenshots",
+        image_dir=root / "images",
     )
 
 

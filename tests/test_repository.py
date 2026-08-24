@@ -79,10 +79,43 @@ class EssenceRepositoryTests(unittest.TestCase):
             )
         migration = EssenceRepository(legacy_path).init_db()
 
-        self.assertEqual(migration, MigrationStats(from_version=0, to_version=1, applied=(1,)))
+        self.assertEqual(
+            migration,
+            MigrationStats(from_version=0, to_version=2, applied=(1, 2)),
+        )
         with closing(sqlite3.connect(legacy_path)) as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0], 1)
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_attachments'"
+                ).fetchone()
+            )
+
+    def test_schema_v1_upgrades_to_attachment_table_without_losing_messages(self) -> None:
+        version_one_path = Path(self.temp_dir.name) / "version-one.db"
+        with closing(sqlite3.connect(version_one_path)) as conn, conn:
+            conn.execute(CREATE_TABLE_SQL)
+            conn.execute(
+                """
+                INSERT INTO essence_messages (
+                    sender, sender_time, essence_time, operator, content_text,
+                    content_type, content_search, source
+                ) VALUES ('旧用户', '', '', '旧管理员', '图片消息', 'image', '图片消息', 'onebot')
+                """
+            )
+            conn.execute("PRAGMA user_version = 1")
+
+        migration = EssenceRepository(version_one_path).init_db()
+
+        self.assertEqual(migration, MigrationStats(from_version=1, to_version=2, applied=(2,)))
+        with closing(sqlite3.connect(version_one_path)) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0], 1)
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_attachments'"
+                ).fetchone()
+            )
 
     def test_rejects_database_newer_than_supported_schema(self) -> None:
         future_path = Path(self.temp_dir.name) / "future.db"
@@ -218,6 +251,8 @@ class EssenceRepositoryTests(unittest.TestCase):
         self.assertEqual(report["by_source"], {"onebot": 2})
         self.assertEqual(report["missing"]["group_id"], 1)
         self.assertEqual(report["duplicates"]["message_identity"], 0)
+        self.assertTrue(report["attachments"]["table_present"])
+        self.assertEqual(report["attachments"]["total"], 0)
         self.assertEqual(self.db_path.stat().st_mtime_ns, modified_before)
 
     def test_audit_missing_database_does_not_create_paths(self) -> None:

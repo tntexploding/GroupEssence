@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from .models import EssenceMessage
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS essence_messages (
@@ -45,6 +45,32 @@ CREATE_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_essence_time ON essence_messages(essence_time);",
     "CREATE INDEX IF NOT EXISTS idx_source_message ON essence_messages(source, group_id, message_id);",
     "CREATE INDEX IF NOT EXISTS idx_source_image ON essence_messages(source, image_path);",
+]
+
+CREATE_ATTACHMENTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS essence_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    essence_id INTEGER NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    remote_url TEXT NOT NULL,
+    local_path TEXT NOT NULL DEFAULT '',
+    content_sha256 TEXT NOT NULL DEFAULT '',
+    mime_type TEXT NOT NULL DEFAULT '',
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    ocr_text TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY(essence_id) REFERENCES essence_messages(id) ON DELETE CASCADE,
+    UNIQUE(essence_id, position)
+);
+"""
+
+CREATE_ATTACHMENTS_INDEX_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_attachment_essence ON essence_attachments(essence_id);",
+    "CREATE INDEX IF NOT EXISTS idx_attachment_hash ON essence_attachments(content_sha256);",
+    "CREATE INDEX IF NOT EXISTS idx_attachment_status ON essence_attachments(status);",
 ]
 
 MESSAGE_COLUMNS = (
@@ -122,6 +148,7 @@ class EssenceRepository:
         else:
             conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def init_db(self) -> MigrationStats:
@@ -140,6 +167,13 @@ class EssenceRepository:
                     conn.execute(sql)
                 conn.execute("PRAGMA user_version = 1")
                 applied.append(1)
+
+            if from_version < 2:
+                conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
+                for sql in CREATE_ATTACHMENTS_INDEX_SQL:
+                    conn.execute(sql)
+                conn.execute("PRAGMA user_version = 2")
+                applied.append(2)
 
             return MigrationStats(
                 from_version=from_version,
@@ -228,6 +262,49 @@ class EssenceRepository:
                 essence_range = conn.execute(
                     "SELECT MIN(NULLIF(essence_time, '')), MAX(NULLIF(essence_time, '')) FROM essence_messages"
                 ).fetchone()
+                attachment_table_present = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_attachments'"
+                ).fetchone() is not None
+                attachment_summary: dict[str, Any] = {
+                    "table_present": attachment_table_present,
+                    "total": 0,
+                    "with_local_file": 0,
+                    "with_ocr": 0,
+                    "by_status": {},
+                }
+                if attachment_table_present:
+                    attachment_summary.update(
+                        {
+                            "total": int(
+                                conn.execute("SELECT COUNT(*) FROM essence_attachments").fetchone()[0]
+                            ),
+                            "with_local_file": int(
+                                conn.execute(
+                                    """
+                                    SELECT COUNT(*) FROM essence_attachments
+                                    WHERE TRIM(local_path) <> ''
+                                    """
+                                ).fetchone()[0]
+                            ),
+                            "with_ocr": int(
+                                conn.execute(
+                                    """
+                                    SELECT COUNT(*) FROM essence_attachments
+                                    WHERE TRIM(ocr_text) <> ''
+                                    """
+                                ).fetchone()[0]
+                            ),
+                            "by_status": {
+                                str(row[0]): int(row[1])
+                                for row in conn.execute(
+                                    """
+                                    SELECT COALESCE(status, ''), COUNT(*)
+                                    FROM essence_attachments GROUP BY status
+                                    """
+                                ).fetchall()
+                            },
+                        }
+                    )
 
                 return {
                     "status": "ok" if integrity == "ok" else "error",
@@ -249,6 +326,7 @@ class EssenceRepository:
                         "sender_time": {"min": sender_range[0], "max": sender_range[1]},
                         "essence_time": {"min": essence_range[0], "max": essence_range[1]},
                     },
+                    "attachments": attachment_summary,
                 }
         except sqlite3.Error as exc:
             return {
@@ -362,6 +440,134 @@ class EssenceRepository:
                 (msg.source, msg.message_id, msg.group_id, msg.group_id),
             ).fetchone()
         return None
+
+    def list_image_messages(self, group_id: str = "") -> list[dict[str, Any]]:
+        """只读返回包含 OneBot 图片地址的消息，不创建或迁移数据库。"""
+        conditions = ["source = 'onebot'", "TRIM(COALESCE(image_path, '')) <> ''"]
+        params: list[str] = []
+        if group_id.strip():
+            conditions.append("group_id = ?")
+            params.append(group_id.strip())
+        with closing(self._connect(read_only=True)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, group_id, message_id, content_text, image_path
+                FROM essence_messages
+                WHERE {' AND '.join(conditions)}
+                ORDER BY id
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_image_attachments(
+        self,
+        essence_ids: Iterable[int],
+    ) -> list[dict[str, Any]]:
+        """只读返回已有附件；旧 schema 尚无附件表时返回空列表。"""
+        ids = sorted({int(value) for value in essence_ids})
+        if not ids:
+            return []
+        with closing(self._connect(read_only=True)) as conn:
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_attachments'"
+            ).fetchone()
+            if table_exists is None:
+                return []
+            placeholders = ", ".join("?" for _ in ids)
+            rows = conn.execute(
+                f"""
+                SELECT id, essence_id, position, remote_url, local_path,
+                       content_sha256, mime_type, byte_size, ocr_text, status, error,
+                       created_at, updated_at
+                FROM essence_attachments
+                WHERE essence_id IN ({placeholders})
+                ORDER BY essence_id, position, id
+                """,
+                ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_image_attachment(
+        self,
+        *,
+        essence_id: int,
+        position: int,
+        remote_url: str,
+        local_path: str,
+        content_sha256: str,
+        mime_type: str,
+        byte_size: int,
+        ocr_text: str,
+        status: str,
+        error: str = "",
+    ) -> None:
+        """保存单个附件结果，并刷新所属消息的聚合 OCR 搜索文本。"""
+        if status not in {"completed", "no_text", "failed"}:
+            raise ValueError(f"不支持的附件状态: {status}")
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO essence_attachments (
+                    essence_id, position, remote_url, local_path, content_sha256,
+                    mime_type, byte_size, ocr_text, status, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(essence_id, position) DO UPDATE SET
+                    remote_url = excluded.remote_url,
+                    local_path = excluded.local_path,
+                    content_sha256 = excluded.content_sha256,
+                    mime_type = excluded.mime_type,
+                    byte_size = excluded.byte_size,
+                    ocr_text = excluded.ocr_text,
+                    status = excluded.status,
+                    error = excluded.error,
+                    updated_at = datetime('now', 'localtime')
+                """,
+                (
+                    int(essence_id),
+                    max(0, int(position)),
+                    remote_url,
+                    local_path,
+                    content_sha256,
+                    mime_type,
+                    max(0, int(byte_size)),
+                    ocr_text,
+                    status,
+                    error,
+                ),
+            )
+            message = conn.execute(
+                "SELECT content_text FROM essence_messages WHERE id = ?",
+                (int(essence_id),),
+            ).fetchone()
+            if message is None:
+                raise ValueError(f"附件所属消息不存在: {essence_id}")
+            ocr_rows = conn.execute(
+                """
+                SELECT ocr_text FROM essence_attachments
+                WHERE essence_id = ? AND status = 'completed' AND TRIM(ocr_text) <> ''
+                ORDER BY position, id
+                """,
+                (int(essence_id),),
+            ).fetchall()
+            ocr_parts: list[str] = []
+            for row in ocr_rows:
+                text = str(row[0]).strip()
+                if text and text not in ocr_parts:
+                    ocr_parts.append(text)
+            aggregated_ocr = "\n".join(ocr_parts)
+            conn.execute(
+                """
+                UPDATE essence_messages
+                SET ocr_text = ?, content_search = ?
+                WHERE id = ?
+                """,
+                (
+                    aggregated_ocr,
+                    _normalized_search_text(message["content_text"], aggregated_ocr),
+                    int(essence_id),
+                ),
+            )
 
     def repair(self, default_group_id: str = "", apply: bool = False) -> dict[str, Any]:
         """预览或修复可从 raw_json 确定恢复的旧记录字段。"""

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 from starlette.requests import Request
 
 from group_essence_extractor.api import SearchQuery, SearchRequest, create_app
-from group_essence_extractor.cli import build_parser
+from group_essence_extractor.cli import build_parser, main
 from group_essence_extractor.config import Settings
 from group_essence_extractor.db import EssenceRepository
 from group_essence_extractor.models import EssenceMessage
@@ -26,6 +29,7 @@ def make_settings(root: Path) -> Settings:
         ocr_lang="chi_sim+eng",
         tesseract_cmd="",
         screenshot_dir=root / "screenshots",
+        image_dir=root / "images",
     )
 
 
@@ -108,9 +112,16 @@ class ApiAndCliTests(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["init-db"]).command, "init-db")
         self.assertEqual(parser.parse_args(["doctor"]).command, "doctor")
+        self.assertTrue(parser.parse_args(["doctor", "--images"]).images)
         self.assertEqual(parser.parse_args(["audit-db"]).command, "audit-db")
         self.assertFalse(parser.parse_args(["repair-db"]).apply)
         self.assertTrue(parser.parse_args(["repair-db", "--apply"]).apply)
+        enrich = parser.parse_args(
+            ["enrich-images", "--apply", "--group-id", "123456", "--limit", "5"]
+        )
+        self.assertTrue(enrich.apply)
+        self.assertEqual(enrich.group_id, "123456")
+        self.assertEqual(enrich.limit, 5)
         self.assertTrue(parser.parse_args(["ingest", "--dry-run"]).dry_run)
         search = parser.parse_args(
             [
@@ -135,6 +146,17 @@ class ApiAndCliTests(unittest.TestCase):
         )
         self.assertEqual(export.command, "export")
         self.assertEqual(export.max_records, 10)
+
+    def test_invalid_image_apply_options_do_not_initialize_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            settings = make_settings(Path(temp))
+            with patch("group_essence_extractor.cli.get_settings", return_value=settings), redirect_stdout(
+                StringIO()
+            ):
+                exit_code = main(["enrich-images", "--apply", "--limit", "0"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(settings.db_path.exists())
 
 
 if __name__ == "__main__":

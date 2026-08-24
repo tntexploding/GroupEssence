@@ -20,6 +20,7 @@ def make_settings(root: Path, **overrides: object) -> Settings:
         "ocr_lang": "chi_sim+eng",
         "tesseract_cmd": "",
         "screenshot_dir": root / "screenshots",
+        "image_dir": root / "images",
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
@@ -75,6 +76,24 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(report["status"], "error")
         checks = {check["name"]: check for check in report["checks"]}
         self.assertEqual(checks["ingest_source"]["status"], "error")
+
+    def test_image_enrichment_checks_tesseract_and_cache_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            executable = root / ("tesseract.exe" if os.name == "nt" else "tesseract")
+            executable.write_bytes(b"fixture")
+            report = run_doctor(
+                make_settings(
+                    root,
+                    fallback_ocr=False,
+                    tesseract_cmd=str(executable),
+                ),
+                require_image_enrichment=True,
+            )
+
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertEqual(checks["tesseract"]["status"], "ok")
+        self.assertEqual(checks["image_dir"]["status"], "ok")
 
 
 if __name__ == "__main__":

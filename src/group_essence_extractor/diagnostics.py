@@ -10,7 +10,10 @@ from .config import Settings
 from .ocr import resolve_tesseract_command
 
 
-def run_doctor(settings: Settings) -> dict[str, Any]:
+def run_doctor(
+    settings: Settings,
+    require_image_enrichment: bool = False,
+) -> dict[str, Any]:
     """执行不联网、不写文件的本地运行条件检查。"""
     checks: list[dict[str, str]] = []
 
@@ -55,7 +58,7 @@ def run_doctor(settings: Settings) -> dict[str, Any]:
     else:
         checks.append(_check("onebot_config", "skipped", "PREFER_ONEBOT=false"))
 
-    if settings.fallback_ocr:
+    if settings.fallback_ocr or require_image_enrichment:
         tesseract = resolve_tesseract_command(settings.tesseract_cmd)
         tesseract_ok = tesseract is not None and tesseract.is_file()
         checks.append(
@@ -67,6 +70,10 @@ def run_doctor(settings: Settings) -> dict[str, Any]:
                 else "未找到 Tesseract，请配置 TESSERACT_CMD 或 PATH",
             )
         )
+    else:
+        checks.append(_check("tesseract", "skipped", "OCR 功能未启用"))
+
+    if settings.fallback_ocr:
         if settings.screenshot_dir.is_dir():
             image_count = sum(
                 1
@@ -89,8 +96,20 @@ def run_doctor(settings: Settings) -> dict[str, Any]:
                 )
             )
     else:
-        checks.append(_check("tesseract", "skipped", "FALLBACK_OCR=false"))
         checks.append(_check("screenshot_dir", "skipped", "FALLBACK_OCR=false"))
+
+    if require_image_enrichment:
+        image_parent = _nearest_existing_parent(settings.image_dir)
+        image_dir_ok = image_parent is not None and os.access(image_parent, os.W_OK)
+        checks.append(
+            _check(
+                "image_dir",
+                "ok" if image_dir_ok else "error",
+                f"图片缓存目录可用或可创建: {settings.image_dir}"
+                if image_dir_ok
+                else f"图片缓存目录不可写: {settings.image_dir}",
+            )
+        )
 
     if not settings.prefer_onebot and not settings.fallback_ocr:
         checks.append(_check("ingest_source", "error", "OneBot 与 OCR 均已关闭"))

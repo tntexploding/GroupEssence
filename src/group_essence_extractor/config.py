@@ -21,6 +21,7 @@ class Settings:
     ocr_lang: str
     tesseract_cmd: str
     screenshot_dir: Path
+    image_dir: Path
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -40,4 +41,5 @@ def get_settings() -> Settings:
         ocr_lang=os.getenv("OCR_LANG", "chi_sim+eng").strip(),
         tesseract_cmd=os.getenv("TESSERACT_CMD", "").strip(),
         screenshot_dir=Path(os.getenv("SCREENSHOT_DIR", "./data/screenshots")).resolve(),
+        image_dir=Path(os.getenv("IMAGE_DIR", "./data/images")).resolve(),
     )

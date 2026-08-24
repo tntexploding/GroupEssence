@@ -10,6 +10,11 @@ from .config import get_settings
 from .db import EssenceRepository
 from .diagnostics import run_doctor
 from .exporters import export_records
+from .image_enrichment import (
+    DEFAULT_MAX_IMAGE_BYTES,
+    enrich_images,
+    validate_enrichment_options,
+)
 from .ingest import ingest_all
 
 
@@ -63,12 +68,25 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest", help="执行一次采集/入库")
     ingest.add_argument("--dry-run", action="store_true", help="采集并检查字段，但不写数据库")
 
-    sub.add_parser("doctor", help="检查本地配置和运行条件（不联网、不写文件）")
+    doctor = sub.add_parser("doctor", help="检查本地配置和运行条件（不联网、不写文件）")
+    doctor.add_argument("--images", action="store_true", help="同时检查图片补全所需条件")
     sub.add_parser("audit-db", help="只读审计现有数据库的数据质量")
 
     repair = sub.add_parser("repair-db", help="预览或修复可从原始响应恢复的旧数据")
     repair.add_argument("--apply", action="store_true", help="实际写入；默认仅做只读预览")
     repair.add_argument("--group-id", default="", help="缺失群号的 OneBot 记录使用此值")
+
+    enrich = sub.add_parser("enrich-images", help="预览或执行 OneBot 图片下载与 OCR")
+    enrich.add_argument("--apply", action="store_true", help="实际下载并写库；默认只读预览")
+    enrich.add_argument("--group-id", default="", help="只处理指定群号；默认处理全部群")
+    enrich.add_argument("--limit", type=int, default=100, help="本次最多处理的附件数")
+    enrich.add_argument("--timeout", type=float, default=20, help="单个图片请求超时秒数")
+    enrich.add_argument(
+        "--max-bytes",
+        type=int,
+        default=DEFAULT_MAX_IMAGE_BYTES,
+        help="允许的单张图片最大字节数",
+    )
 
     search = sub.add_parser("search", help="本地搜索")
     _add_search_arguments(search, pagination=True)
@@ -94,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
 
     if args.command == "doctor":
-        report = run_doctor(settings)
+        report = run_doctor(settings, require_image_enrichment=args.images)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 1 if report["status"] == "error" else 0
 
@@ -126,6 +144,38 @@ def main(argv: list[str] | None = None) -> int:
             default_group_id=args.group_id or settings.group_id,
             apply=args.apply,
         )
+        if migration is not None:
+            report["migration"] = migration.as_dict()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 1 if report["status"] == "error" else 0
+
+    if args.command == "enrich-images":
+        try:
+            validate_enrichment_options(args.limit, args.timeout, args.max_bytes)
+        except ValueError as exc:
+            print(
+                json.dumps(
+                    {"status": "error", "dry_run": not args.apply, "error": str(exc)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        migration = repo.init_db() if args.apply else None
+        try:
+            report = enrich_images(
+                repository=repo,
+                image_dir=settings.image_dir,
+                ocr_lang=settings.ocr_lang,
+                tesseract_cmd=settings.tesseract_cmd,
+                apply=args.apply,
+                group_id=args.group_id,
+                limit=args.limit,
+                timeout_seconds=args.timeout,
+                max_bytes=args.max_bytes,
+            )
+        except ValueError as exc:
+            report = {"status": "error", "dry_run": not args.apply, "error": str(exc)}
         if migration is not None:
             report["migration"] = migration.as_dict()
         print(json.dumps(report, ensure_ascii=False, indent=2))
