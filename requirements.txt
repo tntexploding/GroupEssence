@@ -1,6 +1,3 @@
-fastapi==0.116.1
-uvicorn==0.35.0
-requests==2.32.4
-python-dotenv==1.1.1
-pillow==11.3.0
-pytesseract==0.3.13
+# 兼容仍使用 requirements.txt 的安装流程。
+# 运行时依赖统一维护在 pyproject.toml，避免重复清单发生漂移。
+-e .

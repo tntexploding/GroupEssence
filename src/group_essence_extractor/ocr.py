@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PIL import Image
@@ -10,9 +11,10 @@ def image_to_text(image_path: Path, lang: str = "chi_sim+eng", tesseract_cmd: st
     if tesseract_cmd:
         tesseract_path = Path(tesseract_cmd)
         if tesseract_path.is_dir():
-            tesseract_path = tesseract_path / "tesseract.exe"
+            executable = "tesseract.exe" if os.name == "nt" else "tesseract"
+            tesseract_path = tesseract_path / executable
         pytesseract.pytesseract.tesseract_cmd = str(tesseract_path)
 
-    img = Image.open(image_path)
-    text = pytesseract.image_to_string(img, lang=lang)
+    with Image.open(image_path) as img:
+        text = pytesseract.image_to_string(img, lang=lang)
     return text.strip()

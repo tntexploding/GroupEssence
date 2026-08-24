@@ -1,8 +1,23 @@
-# Ensure consistent line endings
-* text=auto
+# Keep repository text files stable across Windows, Linux and CI.
+* text=auto eol=lf
 
-# Don't include large data in archive exports
-data/screenshots/** export-ignore
-# ignore database files in export
-data/*.db export-ignore
-data/*.sqlite export-ignore
+# Windows command scripts require CRLF for broad compatibility.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets must never be line-ending normalized.
+*.db binary
+*.gif binary
+*.ico binary
+*.jpeg binary
+*.jpg binary
+*.pdf binary
+*.png binary
+*.sqlite binary
+*.webp binary
+
+# Runtime and repository-maintenance files are not needed in source archives.
+.github/ export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore
+data/ export-ignore

@@ -22,6 +22,9 @@ class EssenceMessage:
     raw_data: dict[str, Any] | None = None
 
     def normalized_content_for_search(self) -> str:
-        if self.content_type == "image":
-            return f"{self.content_text}\n{self.ocr_text}".strip()
-        return self.content_text.strip()
+        parts: list[str] = []
+        for value in (self.content_text, self.ocr_text):
+            value = value.strip()
+            if value and value not in parts:
+                parts.append(value)
+        return "\n".join(parts)

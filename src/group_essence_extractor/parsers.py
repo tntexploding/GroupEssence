@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 
@@ -22,6 +23,7 @@ def parse_screenshot_to_essence(
     image_path: Path,
     ocr_lang: str,
     tesseract_cmd: str,
+    group_id: str = "",
 ) -> EssenceMessage:
     text = image_to_text(image_path, lang=ocr_lang, tesseract_cmd=tesseract_cmd)
 
@@ -50,6 +52,16 @@ def parse_screenshot_to_essence(
         content_type=content_type,
         image_path=str(image_path),
         ocr_text=text,
+        group_id=group_id,
+        message_id=f"ocr:{_file_sha256(image_path)}",
         source="ocr_screenshot",
         raw_data={"screenshot": str(image_path), "ocr_text": text},
     )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
