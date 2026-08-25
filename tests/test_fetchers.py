@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 import unittest
 
-from group_essence_extractor.fetchers import (
-    OneBotClient,
-    _fmt_ts,
-    _parse_message_content,
+from group_essence_extractor.fetchers import OneBotClient
+from group_essence_extractor.normalization import (
+    format_timestamp,
+    normalize_essence_items,
+    parse_message_content,
 )
 
 
@@ -154,13 +155,13 @@ class OneBotClientTests(unittest.TestCase):
     def test_timestamp_units_are_normalized(self) -> None:
         seconds = 1_700_000_000
         expected = datetime.fromtimestamp(seconds).strftime("%Y-%m-%d %H:%M:%S")
-        self.assertEqual(_fmt_ts(seconds), expected)
-        self.assertEqual(_fmt_ts(seconds * 1000), expected)
-        self.assertEqual(_fmt_ts(seconds * 1_000_000), expected)
-        self.assertEqual(_fmt_ts("not-a-timestamp"), "not-a-timestamp")
+        self.assertEqual(format_timestamp(seconds), expected)
+        self.assertEqual(format_timestamp(seconds * 1000), expected)
+        self.assertEqual(format_timestamp(seconds * 1_000_000), expected)
+        self.assertEqual(format_timestamp("not-a-timestamp"), "not-a-timestamp")
 
     def test_message_segments_remain_searchable(self) -> None:
-        text, content_type, image_path, _ = _parse_message_content(
+        text, content_type, image_path, _ = parse_message_content(
             {
                 "content": [
                     {"type": "at", "data": {"qq": "10001"}},
@@ -173,6 +174,28 @@ class OneBotClientTests(unittest.TestCase):
         self.assertEqual(content_type, "text")
         self.assertEqual(image_path, "")
         self.assertEqual(text, "@10001[回复消息][表情:14][record]")
+
+    def test_transport_independent_batch_normalization_keeps_detail_errors(self) -> None:
+        messages = normalize_essence_items(
+            [
+                {
+                    "sender_id": 10001,
+                    "operator_id": 10002,
+                    "operator_time": 1_700_000_100,
+                    "message_id": 42,
+                }
+            ],
+            requested_group_id="123456",
+            detail_errors={"42": "get_msg failed"},
+        )
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].group_id, "123456")
+        self.assertEqual(messages[0].message_id, "42")
+        self.assertEqual(
+            (messages[0].raw_data or {}).get("message_detail_error"),
+            "get_msg failed",
+        )
 
 
 if __name__ == "__main__":

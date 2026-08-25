@@ -10,11 +10,11 @@ from group_essence_extractor.db import EssenceRepository
 from group_essence_extractor.ingest import (
     ingest_all,
     ingest_from_screenshots,
-    summarize_messages,
 )
 from group_essence_extractor.models import EssenceMessage
 from group_essence_extractor.ocr import OCRResult
 from group_essence_extractor.parsers import parse_screenshot_to_essence
+from group_essence_extractor.quality import summarize_messages
 
 
 def make_settings(root: Path) -> Settings:
