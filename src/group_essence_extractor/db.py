@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -11,7 +12,7 @@ from typing import Any, Callable, Iterable
 from .models import EssenceMessage, MessageTimeRecord
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS essence_messages (
@@ -71,6 +72,43 @@ CREATE_ATTACHMENTS_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_attachment_essence ON essence_attachments(essence_id);",
     "CREATE INDEX IF NOT EXISTS idx_attachment_hash ON essence_attachments(content_sha256);",
     "CREATE INDEX IF NOT EXISTS idx_attachment_status ON essence_attachments(status);",
+]
+
+CREATE_SYNC_STATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS essence_sync_state (
+    group_id TEXT PRIMARY KEY,
+    last_started_at TEXT NOT NULL DEFAULT '',
+    last_finished_at TEXT NOT NULL DEFAULT '',
+    last_success_at TEXT NOT NULL DEFAULT '',
+    next_run_at TEXT NOT NULL DEFAULT '',
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_error_category TEXT NOT NULL DEFAULT '',
+    last_collected INTEGER NOT NULL DEFAULT 0,
+    last_inserted INTEGER NOT NULL DEFAULT 0,
+    last_updated INTEGER NOT NULL DEFAULT 0,
+    last_refreshed INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    running INTEGER NOT NULL DEFAULT 0,
+    alert_state TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+"""
+
+CREATE_DETAIL_RETRY_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS essence_detail_retry (
+    group_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT NOT NULL DEFAULT '',
+    last_error_category TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(group_id, message_id)
+);
+"""
+
+CREATE_RUNTIME_INDEX_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_sync_state_next_run ON essence_sync_state(next_run_at);",
+    "CREATE INDEX IF NOT EXISTS idx_detail_retry_next ON essence_detail_retry(group_id, next_retry_at);",
 ]
 
 MESSAGE_COLUMNS = (
@@ -152,22 +190,68 @@ class SearchPage:
         }
 
 
+@dataclass(frozen=True)
+class SyncState:
+    group_id: str
+    last_started_at: str = ""
+    last_finished_at: str = ""
+    last_success_at: str = ""
+    next_run_at: str = ""
+    consecutive_failures: int = 0
+    last_error_category: str = ""
+    last_collected: int = 0
+    last_inserted: int = 0
+    last_updated: int = 0
+    last_refreshed: int = 0
+    duration_ms: int = 0
+    running: bool = False
+    alert_state: str = ""
+    updated_at: str = ""
+
+
 class EssenceRepository:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        backup_dir: Path | None = None,
+        busy_timeout_ms: int = 5000,
+    ) -> None:
         self.db_path = db_path
+        self.backup_dir = backup_dir or (db_path.parent / "backups")
+        self.busy_timeout_ms = max(0, min(int(busy_timeout_ms), 60_000))
 
     def _connect(self, read_only: bool = False) -> sqlite3.Connection:
+        timeout_seconds = self.busy_timeout_ms / 1000
         if read_only:
             uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(uri, uri=True, timeout=timeout_seconds)
         else:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=timeout_seconds)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         return conn
 
     def init_db(self) -> MigrationStats:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        from_version = 0
+        should_backup = self.db_path.is_file() and self.db_path.stat().st_size > 0
+        if should_backup:
+            with closing(self._connect(read_only=True)) as read_conn:
+                from_version = int(
+                    read_conn.execute("PRAGMA user_version").fetchone()[0]
+                )
+            if from_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"数据库版本 {from_version} 高于程序支持的版本 {SCHEMA_VERSION}"
+                )
+            if from_version < SCHEMA_VERSION:
+                self.create_backup(
+                    reason=f"pre-migration-v{from_version}-to-v{SCHEMA_VERSION}",
+                    managed=False,
+                )
+
         with closing(self._connect()) as conn, conn:
             from_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if from_version > SCHEMA_VERSION:
@@ -190,11 +274,113 @@ class EssenceRepository:
                 conn.execute("PRAGMA user_version = 2")
                 applied.append(2)
 
+            if from_version < 3:
+                conn.execute(CREATE_SYNC_STATE_TABLE_SQL)
+                conn.execute(CREATE_DETAIL_RETRY_TABLE_SQL)
+                for sql in CREATE_RUNTIME_INDEX_SQL:
+                    conn.execute(sql)
+                conn.execute("PRAGMA user_version = 3")
+                applied.append(3)
+
             return MigrationStats(
                 from_version=from_version,
                 to_version=SCHEMA_VERSION,
                 applied=tuple(applied),
             )
+
+    def create_backup(
+        self,
+        *,
+        reason: str = "scheduled",
+        managed: bool = True,
+        now: datetime | None = None,
+    ) -> Path:
+        """Create and verify an online SQLite snapshot without copying a live file."""
+        if not self.db_path.is_file():
+            raise FileNotFoundError(self.db_path)
+        timestamp = _as_utc(now or datetime.now(timezone.utc))
+        safe_reason = "scheduled" if managed else _safe_backup_reason(reason)
+        filename = f"{safe_reason}-{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}.db"
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.backup_dir, 0o700)
+        except OSError:
+            pass
+        destination = self.backup_dir / filename
+        temporary = destination.with_suffix(".db.tmp")
+        try:
+            with closing(self._connect(read_only=True)) as source, closing(
+                sqlite3.connect(
+                    temporary,
+                    timeout=self.busy_timeout_ms / 1000,
+                )
+            ) as target:
+                source.backup(target)
+                integrity = str(target.execute("PRAGMA quick_check").fetchone()[0])
+                if integrity != "ok":
+                    raise sqlite3.DatabaseError("backup quick_check failed")
+            os.replace(temporary, destination)
+            try:
+                os.chmod(destination, 0o600)
+            except OSError:
+                pass
+            return destination
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def latest_managed_backup_at(self) -> str:
+        backups = self._managed_backup_paths()
+        if not backups:
+            return ""
+        latest = max(backups, key=lambda path: path.stat().st_mtime)
+        timestamp = datetime.fromtimestamp(latest.stat().st_mtime, timezone.utc)
+        return _format_utc(timestamp)
+
+    def prune_managed_backups(
+        self,
+        *,
+        keep_daily: int,
+        keep_weekly: int,
+    ) -> tuple[str, ...]:
+        backups = sorted(
+            self._managed_backup_paths(),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        daily_limit = max(1, min(int(keep_daily), 31))
+        weekly_limit = max(0, min(int(keep_weekly), 52))
+        daily_keys: set[str] = set()
+        weekly_keys: set[str] = set()
+        retained: set[Path] = set()
+        for path in backups:
+            modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            day_key = modified.strftime("%Y-%m-%d")
+            iso_year, iso_week, _ = modified.isocalendar()
+            week_key = f"{iso_year:04d}-{iso_week:02d}"
+            if day_key not in daily_keys and len(daily_keys) < daily_limit:
+                daily_keys.add(day_key)
+                retained.add(path)
+            if week_key not in weekly_keys and len(weekly_keys) < weekly_limit:
+                weekly_keys.add(week_key)
+                retained.add(path)
+
+        removed: list[str] = []
+        for path in backups:
+            if path in retained:
+                continue
+            path.unlink()
+            removed.append(path.name)
+        return tuple(removed)
+
+    def _managed_backup_paths(self) -> list[Path]:
+        if not self.backup_dir.is_dir():
+            return []
+        return [
+            path
+            for path in self.backup_dir.glob("scheduled-*.db")
+            if path.is_file()
+        ]
 
     def audit(self) -> dict[str, Any]:
         """以只读连接汇总数据质量，不创建或修改数据库。"""
@@ -447,25 +633,205 @@ class EssenceRepository:
         existing = {str(row[0]).strip() for row in rows if str(row[0] or "").strip()}
         return candidates - existing
 
-    def previous_detail_failure_ids(self, group_id: str) -> set[str]:
-        """读取已记录的详情失败 ID，防止每次同步重复请求同一旧消息。"""
+    def blocked_detail_retry_ids(
+        self,
+        group_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> set[str]:
+        """Return detail IDs whose retry deadline is still in the future."""
         if not self.db_path.is_file():
             return set()
         with closing(self._connect(read_only=True)) as conn:
+            if not _table_exists(conn, "essence_detail_retry"):
+                return set()
             rows = conn.execute(
                 """
-                SELECT message_id, raw_json
-                FROM essence_messages
-                WHERE source = 'onebot' AND group_id = ?
-                  AND message_id IS NOT NULL AND TRIM(message_id) <> ''
+                SELECT message_id
+                FROM essence_detail_retry
+                WHERE group_id = ? AND next_retry_at > ?
                 """,
-                (str(group_id or "").strip(),),
+                (
+                    str(group_id or "").strip(),
+                    _format_utc(_as_utc(now or datetime.now(timezone.utc))),
+                ),
             ).fetchall()
-        return {
-            str(row["message_id"]).strip()
-            for row in rows
-            if _load_raw_json(row["raw_json"]).get("message_detail_error")
+        return {str(row["message_id"]).strip() for row in rows}
+
+    def update_detail_retry_states(
+        self,
+        group_id: str,
+        *,
+        failed: dict[str, str],
+        resolved: Iterable[str],
+        base_minutes: int,
+        max_hours: int,
+        now: datetime | None = None,
+    ) -> None:
+        normalized_group_id = str(group_id or "").strip()
+        if not normalized_group_id:
+            raise ValueError("detail retry state requires group_id")
+        timestamp = _as_utc(now or datetime.now(timezone.utc))
+        now_text = _format_utc(timestamp)
+        base_delay = max(1, min(int(base_minutes), 1440))
+        max_delay = max(1, min(int(max_hours), 168)) * 60
+        resolved_ids = {
+            str(message_id).strip()
+            for message_id in resolved
+            if str(message_id).strip()
         }
+        failed_ids = {
+            str(message_id).strip(): str(category or "detail_failed")[:64]
+            for message_id, category in failed.items()
+            if str(message_id).strip()
+        }
+        resolved_ids.difference_update(failed_ids)
+        with closing(self._connect()) as conn, conn:
+            for message_id in sorted(resolved_ids):
+                conn.execute(
+                    "DELETE FROM essence_detail_retry WHERE group_id = ? AND message_id = ?",
+                    (normalized_group_id, message_id),
+                )
+            for message_id, category in sorted(failed_ids.items()):
+                row = conn.execute(
+                    """
+                    SELECT failure_count FROM essence_detail_retry
+                    WHERE group_id = ? AND message_id = ?
+                    """,
+                    (normalized_group_id, message_id),
+                ).fetchone()
+                failure_count = int(row[0] if row else 0) + 1
+                exponent = min(max(0, failure_count - 1), 20)
+                delay_minutes = min(base_delay * (2**exponent), max_delay)
+                next_retry_at = _format_utc(
+                    timestamp + timedelta(minutes=delay_minutes)
+                )
+                conn.execute(
+                    """
+                    INSERT INTO essence_detail_retry (
+                        group_id, message_id, failure_count, next_retry_at,
+                        last_error_category, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(group_id, message_id) DO UPDATE SET
+                        failure_count = excluded.failure_count,
+                        next_retry_at = excluded.next_retry_at,
+                        last_error_category = excluded.last_error_category,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        normalized_group_id,
+                        message_id,
+                        failure_count,
+                        next_retry_at,
+                        category,
+                        now_text,
+                    ),
+                )
+
+    def get_sync_state(self, group_id: str) -> SyncState:
+        normalized_group_id = str(group_id or "").strip()
+        if not normalized_group_id:
+            raise ValueError("sync state requires group_id")
+        if not self.db_path.is_file():
+            return SyncState(group_id=normalized_group_id)
+        with closing(self._connect(read_only=True)) as conn:
+            if not _table_exists(conn, "essence_sync_state"):
+                return SyncState(group_id=normalized_group_id)
+            row = conn.execute(
+                "SELECT * FROM essence_sync_state WHERE group_id = ?",
+                (normalized_group_id,),
+            ).fetchone()
+        return _sync_state_from_row(row, normalized_group_id)
+
+    def list_sync_states(self, group_ids: Iterable[str]) -> list[SyncState]:
+        normalized_ids = sorted(
+            {
+                str(group_id).strip()
+                for group_id in group_ids
+                if str(group_id).strip()
+            }
+        )
+        if not normalized_ids:
+            return []
+        if not self.db_path.is_file():
+            return [SyncState(group_id=group_id) for group_id in normalized_ids]
+        with closing(self._connect(read_only=True)) as conn:
+            if not _table_exists(conn, "essence_sync_state"):
+                return [SyncState(group_id=group_id) for group_id in normalized_ids]
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            rows = conn.execute(
+                f"SELECT * FROM essence_sync_state WHERE group_id IN ({placeholders})",
+                normalized_ids,
+            ).fetchall()
+        by_group = {
+            str(row["group_id"]): _sync_state_from_row(row, str(row["group_id"]))
+            for row in rows
+        }
+        return [by_group.get(group_id, SyncState(group_id)) for group_id in normalized_ids]
+
+    def save_sync_state(self, state: SyncState) -> None:
+        normalized_group_id = str(state.group_id or "").strip()
+        if not normalized_group_id:
+            raise ValueError("sync state requires group_id")
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO essence_sync_state (
+                    group_id, last_started_at, last_finished_at, last_success_at,
+                    next_run_at, consecutive_failures, last_error_category,
+                    last_collected, last_inserted, last_updated, last_refreshed,
+                    duration_ms, running, alert_state, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    last_started_at = excluded.last_started_at,
+                    last_finished_at = excluded.last_finished_at,
+                    last_success_at = excluded.last_success_at,
+                    next_run_at = excluded.next_run_at,
+                    consecutive_failures = excluded.consecutive_failures,
+                    last_error_category = excluded.last_error_category,
+                    last_collected = excluded.last_collected,
+                    last_inserted = excluded.last_inserted,
+                    last_updated = excluded.last_updated,
+                    last_refreshed = excluded.last_refreshed,
+                    duration_ms = excluded.duration_ms,
+                    running = excluded.running,
+                    alert_state = excluded.alert_state,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_group_id,
+                    state.last_started_at,
+                    state.last_finished_at,
+                    state.last_success_at,
+                    state.next_run_at,
+                    max(0, int(state.consecutive_failures)),
+                    str(state.last_error_category or "")[:64],
+                    max(0, int(state.last_collected)),
+                    max(0, int(state.last_inserted)),
+                    max(0, int(state.last_updated)),
+                    max(0, int(state.last_refreshed)),
+                    max(0, int(state.duration_ms)),
+                    int(bool(state.running)),
+                    str(state.alert_state or "")[:32],
+                    state.updated_at or _format_utc(datetime.now(timezone.utc)),
+                ),
+            )
+
+    def clear_stale_running_states(self) -> int:
+        if not self.db_path.is_file():
+            return 0
+        with closing(self._connect()) as conn, conn:
+            if not _table_exists(conn, "essence_sync_state"):
+                return 0
+            cursor = conn.execute(
+                """
+                UPDATE essence_sync_state
+                SET running = 0, updated_at = ?
+                WHERE running <> 0
+                """,
+                (_format_utc(datetime.now(timezone.utc)),),
+            )
+        return max(0, cursor.rowcount)
 
     def backfill_sender_times(
         self,
@@ -1145,3 +1511,54 @@ def _normalized_search_text(content_text: Any, ocr_text: Any) -> str:
         if text and text not in parts:
             parts.append(text)
     return "\n".join(parts)
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _sync_state_from_row(row: sqlite3.Row | None, group_id: str) -> SyncState:
+    if row is None:
+        return SyncState(group_id=group_id)
+    return SyncState(
+        group_id=group_id,
+        last_started_at=str(row["last_started_at"] or ""),
+        last_finished_at=str(row["last_finished_at"] or ""),
+        last_success_at=str(row["last_success_at"] or ""),
+        next_run_at=str(row["next_run_at"] or ""),
+        consecutive_failures=max(0, int(row["consecutive_failures"] or 0)),
+        last_error_category=str(row["last_error_category"] or ""),
+        last_collected=max(0, int(row["last_collected"] or 0)),
+        last_inserted=max(0, int(row["last_inserted"] or 0)),
+        last_updated=max(0, int(row["last_updated"] or 0)),
+        last_refreshed=max(0, int(row["last_refreshed"] or 0)),
+        duration_ms=max(0, int(row["duration_ms"] or 0)),
+        running=bool(row["running"]),
+        alert_state=str(row["alert_state"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _format_utc(value: datetime) -> str:
+    return _as_utc(value).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _safe_backup_reason(value: str) -> str:
+    normalized = "".join(
+        character
+        for character in str(value or "").lower()
+        if character.isalnum() or character in {"-", "_"}
+    )
+    return normalized[:80] or "manual"

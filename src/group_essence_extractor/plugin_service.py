@@ -46,6 +46,19 @@ class StatusReport:
 
 
 @dataclass(frozen=True)
+class RuntimeStatusReport:
+    scheduled_sync_enabled: bool
+    task_running: bool
+    blocked_reason: str = ""
+    last_success_at: str = ""
+    next_run_at: str = ""
+    consecutive_failures: int = 0
+    last_error_category: str = ""
+    automatic_backups_enabled: bool = False
+    last_backup_at: str = ""
+
+
+@dataclass(frozen=True)
 class SyncReport:
     collected: int
     inserted: int
@@ -54,6 +67,8 @@ class SyncReport:
     unchanged: int
     sender_times_enriched: int = 0
     history_lookup_failed: bool = False
+    detail_failures: int = 0
+    detail_deferred: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,6 +96,8 @@ class GroupEssencePluginService:
         validation_detail_request_limit: int = 10,
         sync_detail_request_limit: int = 10,
         history_query_limit: int = 100,
+        detail_retry_base_minutes: int = 15,
+        detail_retry_max_hours: int = 24,
     ) -> None:
         self.source = source
         self.repository = repository
@@ -93,6 +110,11 @@ class GroupEssencePluginService:
             min(int(sync_detail_request_limit), 50),
         )
         self.history_query_limit = max(0, min(int(history_query_limit), 500))
+        self.detail_retry_base_minutes = max(
+            1,
+            min(int(detail_retry_base_minutes), 1440),
+        )
+        self.detail_retry_max_hours = max(1, min(int(detail_retry_max_hours), 168))
         self.operation_lock = asyncio.Lock()
 
     async def validate(self, event: Any, group_id: str) -> ValidationReport:
@@ -107,16 +129,17 @@ class GroupEssencePluginService:
     async def sync(self, event: Any, group_id: str) -> SyncReport:
         normalized_group_id = _require_group_id(group_id)
         async with self.operation_lock:
-            previous_failures = await asyncio.to_thread(
-                self.repository.previous_detail_failure_ids,
+            deferred_detail_ids = await asyncio.to_thread(
+                self.repository.blocked_detail_retry_ids,
                 normalized_group_id,
             )
             messages = await self.source.get_essence_messages(
                 event,
                 normalized_group_id,
                 detail_request_limit=self.sync_detail_request_limit,
-                skip_detail_ids=previous_failures,
+                skip_detail_ids=deferred_detail_ids,
             )
+            failed_detail_ids, resolved_detail_ids = _detail_retry_outcomes(messages)
             unseen_ids = await asyncio.to_thread(
                 self.repository.unseen_message_ids,
                 normalized_group_id,
@@ -144,7 +167,13 @@ class GroupEssencePluginService:
                 except OneBotActionError:
                     history_lookup_failed = True
             try:
-                stats = await asyncio.to_thread(self._persist_messages, messages)
+                stats = await asyncio.to_thread(
+                    self._persist_messages,
+                    normalized_group_id,
+                    messages,
+                    failed_detail_ids,
+                    resolved_detail_ids,
+                )
             except Exception as exc:
                 raise PluginServiceError("数据库同步失败。", type(exc).__name__) from None
         return SyncReport(
@@ -155,6 +184,11 @@ class GroupEssencePluginService:
             unchanged=stats.unchanged,
             sender_times_enriched=sender_times_enriched,
             history_lookup_failed=history_lookup_failed,
+            detail_failures=len(failed_detail_ids),
+            detail_deferred=len(
+                deferred_detail_ids
+                & {message.message_id for message in messages if message.message_id}
+            ),
         )
 
     async def repair_sender_times(
@@ -229,9 +263,23 @@ class GroupEssencePluginService:
             ),
         )
 
-    def _persist_messages(self, messages: list[EssenceMessage]) -> SaveStats:
+    def _persist_messages(
+        self,
+        group_id: str,
+        messages: list[EssenceMessage],
+        failed_detail_ids: dict[str, str],
+        resolved_detail_ids: set[str],
+    ) -> SaveStats:
         self.repository.init_db()
-        return self.repository.upsert_messages(messages)
+        stats = self.repository.upsert_messages(messages)
+        self.repository.update_detail_retry_states(
+            group_id,
+            failed=failed_detail_ids,
+            resolved=resolved_detail_ids,
+            base_minutes=self.detail_retry_base_minutes,
+            max_hours=self.detail_retry_max_hours,
+        )
+        return stats
 
     async def _search_page(
         self,
@@ -323,6 +371,7 @@ def format_status_report(
     *,
     validation_mode: bool,
     allowed_group_count: int,
+    runtime: RuntimeStatusReport | None = None,
 ) -> str:
     mode = "只读验收" if validation_mode else "同步与查询"
     database = "未初始化" if not report.database_exists else "可用"
@@ -340,6 +389,35 @@ def format_status_report(
                 f"发送时间缺失：{report.missing_sender_time}",
             )
         )
+    if runtime is not None:
+        if not runtime.scheduled_sync_enabled:
+            schedule_status = "关闭"
+        elif runtime.blocked_reason:
+            schedule_status = "已阻塞"
+        elif runtime.task_running:
+            schedule_status = "运行中"
+        else:
+            schedule_status = "未运行"
+        lines.append(f"计划同步：{schedule_status}")
+        if runtime.blocked_reason and runtime.blocked_reason != "disabled":
+            lines.append(
+                f"调度阻塞：{_runtime_block_reason(runtime.blocked_reason)}"
+            )
+        if runtime.last_success_at:
+            lines.append(f"上次自动成功：{runtime.last_success_at}")
+        if runtime.next_run_at:
+            lines.append(f"下次自动运行：{runtime.next_run_at}")
+        if runtime.consecutive_failures:
+            lines.append(f"连续失败：{runtime.consecutive_failures}")
+        if runtime.last_error_category:
+            lines.append(
+                "最后错误类别："
+                f"{_safe_reply_text(runtime.last_error_category, 64)}"
+            )
+        backup_status = "开启" if runtime.automatic_backups_enabled else "关闭"
+        lines.append(f"自动备份：{backup_status}")
+        if runtime.last_backup_at:
+            lines.append(f"最近备份：{runtime.last_backup_at}")
     return "\n".join(lines)
 
 
@@ -355,6 +433,8 @@ def format_sync_report(report: SyncReport) -> str:
             f"未变化：{report.unchanged}",
             f"新记录时间补全：{report.sender_times_enriched}",
             f"历史查询失败：{'是' if report.history_lookup_failed else '否'}",
+            f"详情失败：{report.detail_failures}",
+            f"详情延后：{report.detail_deferred}",
         )
     )
 
@@ -413,6 +493,42 @@ def format_search_page(
 def _type_summary(values: Any) -> str:
     names = sorted({type(value).__name__ for value in values})
     return "|".join(names) if names else "missing"
+
+
+def _detail_retry_outcomes(
+    messages: list[EssenceMessage],
+) -> tuple[dict[str, str], set[str]]:
+    failed: dict[str, str] = {}
+    resolved: set[str] = set()
+    for message in messages:
+        message_id = str(message.message_id or "").strip()
+        if not message_id:
+            continue
+        raw_data = message.raw_data or {}
+        requested = bool(raw_data.get("message_detail_requested"))
+        error = str(raw_data.get("message_detail_error") or "").strip()
+        if requested:
+            if error:
+                failed[message_id] = "get_msg_failed"
+            elif not message.content_text.strip() or message.content_text == "[空消息]":
+                failed[message_id] = "get_msg_incomplete"
+            else:
+                resolved.add(message_id)
+            continue
+        essence = raw_data.get("essence")
+        if isinstance(essence, Mapping) and not needs_message_detail(essence):
+            resolved.add(message_id)
+    return failed, resolved
+
+
+def _runtime_block_reason(value: str) -> str:
+    return {
+        "validation_mode": "只读验收模式",
+        "missing_allowed_groups": "未配置授权群",
+        "missing_platform_id": "未配置 OneBot 平台 ID",
+        "database_init_failed": "数据库初始化失败",
+        "runtime_error": "后台监督循环异常，正在自动重试",
+    }.get(str(value or ""), "配置无效")
 
 
 def _format_counts(values: Mapping[str, int]) -> str:

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 
 from group_essence_extractor.db import (
+    CREATE_ATTACHMENTS_TABLE_SQL,
     CREATE_TABLE_SQL,
     SCHEMA_VERSION,
     EssenceRepository,
@@ -148,17 +151,74 @@ class EssenceRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(self.repo.search(sender_qq="10001")[0]["sender_time"], "")
 
-    def test_previous_detail_failures_are_read_without_creating_new_requests(self) -> None:
+    def test_detail_failures_use_bounded_retry_deadlines_and_can_resolve(self) -> None:
         message = make_message(content_text="[空消息]")
         message.raw_data = {
             "essence": {"message_id": "message-1"},
             "message_detail_error": "OneBot action=get_msg",
         }
         self.repo.upsert_messages([message])
+        started_at = datetime(2026, 8, 25, 10, 0, tzinfo=timezone.utc)
 
+        # Legacy raw error metadata is not a permanent deny-list after v3.
         self.assertEqual(
-            self.repo.previous_detail_failure_ids("123456"),
+            self.repo.blocked_detail_retry_ids("123456", now=started_at),
+            set(),
+        )
+        self.repo.update_detail_retry_states(
+            "123456",
+            failed={"message-1": "get_msg_failed"},
+            resolved=set(),
+            base_minutes=15,
+            max_hours=24,
+            now=started_at,
+        )
+        self.assertEqual(
+            self.repo.blocked_detail_retry_ids("123456", now=started_at),
             {"message-1"},
+        )
+        self.assertEqual(
+            self.repo.blocked_detail_retry_ids(
+                "123456",
+                now=started_at + timedelta(minutes=16),
+            ),
+            set(),
+        )
+
+        self.repo.update_detail_retry_states(
+            "123456",
+            failed={"message-1": "get_msg_failed"},
+            resolved=set(),
+            base_minutes=15,
+            max_hours=24,
+            now=started_at + timedelta(minutes=16),
+        )
+        self.assertEqual(
+            self.repo.blocked_detail_retry_ids(
+                "123456",
+                now=started_at + timedelta(minutes=45),
+            ),
+            {"message-1"},
+        )
+        self.assertEqual(
+            self.repo.blocked_detail_retry_ids(
+                "123456",
+                now=started_at + timedelta(minutes=47),
+            ),
+            set(),
+        )
+
+        self.repo.update_detail_retry_states(
+            "123456",
+            failed={},
+            resolved={"message-1"},
+            base_minutes=15,
+            max_hours=24,
+            now=started_at + timedelta(minutes=47),
+        )
+        self.assertEqual(
+            self.repo.blocked_detail_retry_ids("123456", now=started_at),
+            set(),
         )
 
     def test_schema_migration_is_versioned_and_idempotent(self) -> None:
@@ -182,15 +242,41 @@ class EssenceRepositoryTests(unittest.TestCase):
 
         self.assertEqual(
             migration,
-            MigrationStats(from_version=0, to_version=2, applied=(1, 2)),
+            MigrationStats(from_version=0, to_version=3, applied=(1, 2, 3)),
         )
         with closing(sqlite3.connect(legacy_path)) as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(
+                conn.execute("PRAGMA user_version").fetchone()[0],
+                SCHEMA_VERSION,
+            )
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0], 1)
             self.assertIsNotNone(
                 conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_attachments'"
                 ).fetchone()
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_sync_state'"
+                ).fetchone()
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_detail_retry'"
+                ).fetchone()
+            )
+        migration_backups = list(
+            (legacy_path.parent / "backups").glob("pre-migration-v0-to-v3-*.db")
+        )
+        self.assertEqual(len(migration_backups), 1)
+        with closing(sqlite3.connect(migration_backups[0])) as backup_conn:
+            self.assertEqual(
+                backup_conn.execute("PRAGMA quick_check").fetchone()[0],
+                "ok",
+            )
+            self.assertEqual(
+                backup_conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0],
+                1,
             )
 
     def test_schema_v1_upgrades_to_attachment_table_without_losing_messages(self) -> None:
@@ -209,7 +295,10 @@ class EssenceRepositoryTests(unittest.TestCase):
 
         migration = EssenceRepository(version_one_path).init_db()
 
-        self.assertEqual(migration, MigrationStats(from_version=1, to_version=2, applied=(2,)))
+        self.assertEqual(
+            migration,
+            MigrationStats(from_version=1, to_version=3, applied=(2, 3)),
+        )
         with closing(sqlite3.connect(version_one_path)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0], 1)
             self.assertIsNotNone(
@@ -217,6 +306,85 @@ class EssenceRepositoryTests(unittest.TestCase):
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_attachments'"
                 ).fetchone()
             )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_sync_state'"
+                ).fetchone()
+            )
+
+    def test_schema_v2_upgrades_runtime_tables_with_pre_migration_backup(self) -> None:
+        version_two_path = Path(self.temp_dir.name) / "version-two.db"
+        backup_dir = Path(self.temp_dir.name) / "version-two-backups"
+        with closing(sqlite3.connect(version_two_path)) as conn, conn:
+            conn.execute(CREATE_TABLE_SQL)
+            conn.execute(CREATE_ATTACHMENTS_TABLE_SQL)
+            conn.execute(
+                """
+                INSERT INTO essence_messages (
+                    sender, sender_time, essence_time, operator, content_text,
+                    content_type, content_search, source
+                ) VALUES ('旧用户', '', '', '旧管理员', '旧消息', 'text', '旧消息', 'onebot')
+                """
+            )
+            conn.execute("PRAGMA user_version = 2")
+
+        migration = EssenceRepository(
+            version_two_path,
+            backup_dir=backup_dir,
+        ).init_db()
+
+        self.assertEqual(
+            migration,
+            MigrationStats(from_version=2, to_version=3, applied=(3,)),
+        )
+        with closing(sqlite3.connect(version_two_path)) as conn:
+            self.assertEqual(
+                conn.execute("PRAGMA user_version").fetchone()[0],
+                SCHEMA_VERSION,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM essence_messages").fetchone()[0],
+                1,
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_sync_state'"
+                ).fetchone()
+            )
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essence_detail_retry'"
+                ).fetchone()
+            )
+        self.assertEqual(
+            len(list(backup_dir.glob("pre-migration-v2-to-v3-*.db"))),
+            1,
+        )
+
+    def test_online_backup_retention_keeps_daily_and_weekly_union(self) -> None:
+        timestamps = [
+            datetime(2026, 8, 25, 12, tzinfo=timezone.utc),
+            datetime(2026, 8, 24, 12, tzinfo=timezone.utc),
+            datetime(2026, 8, 18, 12, tzinfo=timezone.utc),
+            datetime(2026, 8, 11, 12, tzinfo=timezone.utc),
+        ]
+        backups: list[Path] = []
+        for timestamp in timestamps:
+            backup = self.repo.create_backup(now=timestamp)
+            os.utime(backup, (timestamp.timestamp(), timestamp.timestamp()))
+            backups.append(backup)
+
+        removed = self.repo.prune_managed_backups(
+            keep_daily=2,
+            keep_weekly=2,
+        )
+
+        retained = {path.name for path in self.repo.backup_dir.glob("scheduled-*.db")}
+        self.assertEqual(
+            retained,
+            {backups[0].name, backups[1].name, backups[2].name},
+        )
+        self.assertEqual(removed, (backups[3].name,))
 
     def test_rejects_database_newer_than_supported_schema(self) -> None:
         future_path = Path(self.temp_dir.name) / "future.db"

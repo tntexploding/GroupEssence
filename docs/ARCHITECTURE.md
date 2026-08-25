@@ -15,9 +15,11 @@ SQLite，并通过 AstrBot 插件、CLI 和 HTTP API 复用相同的标准化与
 | `normalization.py` | 与传输无关地判断详情需求、解析消息段并生成 `EssenceMessage` |
 | `quality.py` | 汇总标准化记录的字段缺失、内容类型与 OCR 质量 |
 | `fetchers.py` | 独立应用的同步 HTTP OneBot 请求与详情取得 |
-| `astrbot_source.py` | 通过当前 AstrBot 事件异步调用 OneBot Action |
+| `astrbot_source.py` | 通过事件或后台网关异步调用 OneBot Action |
+| `astrbot_gateway.py` | 按平台 ID 动态解析 AIOCQHTTP 客户端，不持有消息事件 |
 | `plugin_config.py` | 解析插件配置并执行管理员、群白名单授权 |
-| `plugin_service.py` | 编排只读验收、同步、查询、状态和并发控制 |
+| `plugin_service.py` | 编排只读验收、同步、详情重试、查询、状态和并发控制 |
+| `runtime.py` | 管理单实例后台任务、超时退避、告警、备份和健康快照 |
 | `ocr.py` | 调用 Tesseract，自适应选择原图或低置信度灰度兜底结果 |
 | `parsers.py` | 从标签模板或 QQ 卡片布局提取字段并生成截图指纹 |
 | `models.py` | 定义来源无关的 `EssenceMessage` 与最小时间匹配记录 |
@@ -54,12 +56,12 @@ CLI、API 和 AstrBot 入口只负责平台输入输出。HTTP 和 AstrBot 分�
 
 ### AstrBot Action 适配
 
-远端数据流为：
+手动指令与后台同步在 Action 层汇合：
 
 ```text
-QQ 指令
-  -> AstrBot AIOCQHTTP 事件
-  -> event.bot 的 call_action
+QQ 管理员指令 -> AstrBot AIOCQHTTP 事件 -> event.bot 的 call_action
+AstrBot 生命周期 -> runtime.py -> Context.get_platform_inst(platform_id)
+                                -> AIOCQHTTP get_client().call_action
   -> get_essence_msg_list / 正文缺失时 get_msg
   -> 新记录缺时间时一次有界 get_group_msg_history
   -> normalization.py
@@ -67,28 +69,48 @@ QQ 指令
   -> AstrBot 数据卷中的 SQLite
 ```
 
-插件不连接 NapCat HTTP 地址，也不保存 Token。`astrbot_source.py` 同时兼容 Action
+后台网关每次调用都按显式平台 ID 重新取得当前客户端，因此适配平台重连，但不保存
+事件或客户端实例。插件不连接 NapCat HTTP 地址，也不保存 Token。`astrbot_source.py` 同时兼容 Action
 直接返回 data 与完整 OneBot envelope；status/retcode 异常只形成不含 payload 的
 公开错误。单条详情失败保留精华项，并只记录脱敏后的错误摘要；同步请求另有上限，
-数据库中已有的失败 ID 不会在每轮重复请求。仅缺发送时间不会触发 `get_msg`，也不
+schema v3 为失败 ID 保存独立的下次重试截止时间，按失败次数指数退避；到期后会再次
+尝试，因此不会每轮重复请求，也不会永久跳过。仅缺发送时间不会触发 `get_msg`，也不
 使用精华设置时间伪造发送时间。新记录可用一次有界群历史查询补全，旧记录由管理员
 显式运行补全命令；历史结果只转换成消息身份和时间，不保留正文或发送者。
 
-插件不注册全量群消息监听器。所有采集与补全都来自明确的管理员命令，避免改变普通
-消息的 AstrBot 唤醒与 LLM 流程。
+插件不注册全量群消息监听器。采集只来自明确的管理员命令或显式启用的白名单计划
+任务，避免改变普通消息的 AstrBot 唤醒与 LLM 流程；后台采集和告警均不调用 LLM。
 
 所有指令进入处理器后立即 `stop_event()`，因此不会继续进入 LLM。插件自身再次执行
 管理员 ID 和群白名单精确匹配；群聊查询固定使用当前群，私聊使用同时在白名单内的
 默认群，只有管理员同步/验收指令可以显式指定白名单群。
 
 `validation_mode=true` 时只有验收和状态可实际执行，初始化插件、验收和状态都不会
-创建数据库。关闭该模式后，同步才惰性初始化数据库，查询仍拒绝空关键词且每次限制
+创建数据库，后台同步和自动备份也不会启动。关闭该模式后，手动同步才惰性初始化数据库，查询仍拒绝空关键词且每次限制
 在 1–20 条。验收阶段只处理最多 `max_validation_detail_requests` 个正文缺失项；正式
 同步使用独立的 `max_sync_detail_requests` 上限，群历史读取使用
 `history_query_limit`。报告区分候选、实际请求、跳过和失败数，避免历史消息批量失败
 刷屏。同步、查询和审计等同步
 SQLite 工作全部通过 `asyncio.to_thread` 执行，
 服务实例用一个 `asyncio.Lock` 串行化 Action 与数据库操作，避免多个管理员命令重入。
+
+### 无人值守运行时
+
+0.4.0 的 `GroupEssenceRuntime` 由 `on_astrbot_loaded` 启动并由插件 `terminate` 取消，
+同一插件实例最多拥有一个任务。它按群白名单排序串行执行同步，单群使用硬超时；失败
+采用指数退避，达到阈值后至少等待一个正常同步周期，相当于打开降频熔断。成功后的
+正常间隔带有有界抖动，避免固定时刻请求。
+
+每群的开始、完成、下次运行、连续失败、错误类别、聚合写入统计、耗时和告警状态均
+保存在 `essence_sync_state`。重启时清除遗留的 `running` 标记，但保留未来退避截止时间
+与失败计数。告警只在首次达到持续失败阈值和随后恢复时发送给管理员，内容只包含聚合
+计数和错误类别；发送失败不会中断同步，也不会被误记为已送达，后续降频周期会重试。
+
+后台任务同时可按独立开关执行 SQLite 在线备份。备份写入临时文件，执行
+`PRAGMA quick_check` 后原子改名，并按每日与每周集合保留；现有数据库发生 schema
+迁移前总会先创建不受轮换管理的快照。`ge_health.json` 也通过临时文件原子替换，只有
+状态、时间、计数和错误类别，不包含群 ID、管理员 ID 或消息数据。所有新后台能力默认
+关闭，缺少平台 ID、白名单或仍处于验收模式时不会启动计划同步。
 
 插件数据目录固定为 AstrBot 数据根目录下的
 `plugin_data/astrbot_plugin_group_essence/`。源码目录、本仓库 `data/` 和当前工作目录
@@ -154,6 +176,11 @@ schema v2 新增 `essence_attachments`，以 `essence_id` 关联消息，并保�
 远端地址、本地相对路径、内容哈希、MIME、字节数、OCR 文本、状态和错误。原始
 `image_path` 保持不变，用于追溯来源；附件 OCR 通过消息表的现有字段参与搜索和导出。
 
+schema v3 新增 `essence_sync_state` 与 `essence_detail_retry`。两张表只保存运行控制所需
+的群/消息稳定标识、截止时间、聚合计数和脱敏错误类别，不复制正文或 OneBot payload。
+SQLite 保持默认 rollback journal；连接统一设置有界 `busy_timeout`，不为当前单任务
+写入模型启用 WAL。
+
 `audit-db` 使用 SQLite `mode=ro` 连接，执行 `PRAGMA quick_check` 并聚合缺失字段、
 重复稳定身份、来源/类型分布和时间范围。数据库文件不存在或表结构不正确时只返回
 错误，不创建目录或空数据库；报告同时给出当前与支持的 schema 版本。
@@ -184,7 +211,8 @@ CSV 使用稳定列顺序。
   AstrBot 可安装插件边界；插件依赖表不得引入独立 API/OCR 依赖。
 - `data/` 中的数据库、截图和哈希图片缓存属于本地运行数据。
 - 远端插件运行数据只进入 AstrBot 数据卷的专用 `plugin_data` 子目录，不回写 Git
-  仓库或插件源码目录。
+  仓库或插件源码目录；数据库备份位于其 `backups/` 子目录，健康快照为
+  `ge_health.json`。
 - 自动测试使用系统临时目录，不读写默认数据库，也不依赖真实 OneBot 或
   Tesseract 服务。
 - OCR 引擎测试使用临时生成图片和模拟的 Tesseract TSV 数据；解析测试只使用脱敏

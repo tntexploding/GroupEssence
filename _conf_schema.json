@@ -32,7 +32,7 @@
   "max_sync_detail_requests": {
     "description": "同步时最多补全正文数量",
     "type": "int",
-    "hint": "仅请求此前未失败的正文缺失项，代码会限制在 0 到 50；失败记录不会在每次同步中重复请求。",
+    "hint": "正文详情请求限制在 0 到 50；失败项只在各自退避截止时间到期后重试。",
     "default": 10
   },
   "history_query_limit": {
@@ -55,13 +55,103 @@
   "enable_image_enrichment": {
     "description": "启用图片补全",
     "type": "bool",
-    "hint": "第一版插件不执行图片下载或 OCR，请保持关闭。",
+    "hint": "当前插件运行时不执行图片下载或 OCR，请保持关闭。",
     "default": false
   },
   "enable_scheduled_sync": {
     "description": "启用计划同步",
     "type": "bool",
-    "hint": "第一版仅支持管理员主动指令，请保持关闭。",
+    "hint": "启用前必须填写 OneBot 平台 ID；后台任务不会调用 LLM。",
     "default": false
+  },
+  "onebot_platform_id": {
+    "description": "OneBot 平台 ID",
+    "type": "string",
+    "hint": "填写 AstrBot 平台配置中 AIOCQHTTP/NapCat 实例的唯一 ID；计划同步不会保存消息事件。",
+    "default": ""
+  },
+  "scheduled_sync_interval_minutes": {
+    "description": "计划同步间隔（分钟）",
+    "type": "int",
+    "hint": "范围 5 到 1440；建议首次灰度使用 30。",
+    "default": 30
+  },
+  "scheduled_sync_startup_delay_seconds": {
+    "description": "启动等待（秒）",
+    "type": "int",
+    "hint": "等待 NapCat 和平台连接就绪；范围 0 到 3600。",
+    "default": 60
+  },
+  "scheduled_sync_timeout_seconds": {
+    "description": "单群同步超时（秒）",
+    "type": "int",
+    "hint": "范围 10 到 600，超时后进入退避重试。",
+    "default": 90
+  },
+  "scheduled_sync_jitter_percent": {
+    "description": "同步抖动百分比",
+    "type": "int",
+    "hint": "范围 0 到 30，用于避免固定时刻集中请求。",
+    "default": 10
+  },
+  "scheduled_sync_failure_threshold": {
+    "description": "连续失败告警阈值",
+    "type": "int",
+    "hint": "范围 1 到 10；达到阈值后降频并向管理员发送一次告警。",
+    "default": 3
+  },
+  "scheduled_sync_retry_base_seconds": {
+    "description": "失败重试基础等待（秒）",
+    "type": "int",
+    "hint": "范围 5 到 3600，按连续失败次数指数退避。",
+    "default": 30
+  },
+  "scheduled_sync_max_backoff_minutes": {
+    "description": "最大退避（分钟）",
+    "type": "int",
+    "hint": "范围 1 到 1440；达到失败阈值后至少等待一个正常同步周期。",
+    "default": 60
+  },
+  "detail_retry_base_minutes": {
+    "description": "详情失败基础重试（分钟）",
+    "type": "int",
+    "hint": "get_msg 失败后按消息独立指数退避；范围 1 到 1440。",
+    "default": 15
+  },
+  "detail_retry_max_hours": {
+    "description": "详情失败最大退避（小时）",
+    "type": "int",
+    "hint": "范围 1 到 168；失败消息不会被永久跳过。",
+    "default": 24
+  },
+  "enable_failure_alerts": {
+    "description": "启用管理员故障告警",
+    "type": "bool",
+    "hint": "只在持续失败与恢复的状态转换时私聊管理员，不经过 LLM。",
+    "default": true
+  },
+  "enable_automatic_backups": {
+    "description": "启用数据库自动备份",
+    "type": "bool",
+    "hint": "使用 SQLite 在线备份 API；只读验收模式下不会运行。",
+    "default": false
+  },
+  "backup_interval_hours": {
+    "description": "自动备份间隔（小时）",
+    "type": "int",
+    "hint": "范围 1 到 168。数据库迁移前备份不受此开关影响。",
+    "default": 24
+  },
+  "backup_keep_daily": {
+    "description": "保留日备份数量",
+    "type": "int",
+    "hint": "范围 1 到 31。",
+    "default": 7
+  },
+  "backup_keep_weekly": {
+    "description": "保留周备份数量",
+    "type": "int",
+    "hint": "范围 0 到 52，与日备份取并集保留。",
+    "default": 4
   }
 }

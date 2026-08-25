@@ -11,6 +11,7 @@ from .src.group_essence_extractor.astrbot_source import (
     AstrBotEssenceSource,
     OneBotActionError,
 )
+from .src.group_essence_extractor.astrbot_gateway import AstrBotOneBotGateway
 from .src.group_essence_extractor.db import EssenceRepository
 from .src.group_essence_extractor.plugin_config import PluginSettings
 from .src.group_essence_extractor.plugin_service import (
@@ -21,6 +22,10 @@ from .src.group_essence_extractor.plugin_service import (
     format_status_report,
     format_sync_report,
     format_validation_report,
+)
+from .src.group_essence_extractor.runtime import (
+    GroupEssenceRuntime,
+    RuntimeConfig,
 )
 
 
@@ -36,15 +41,43 @@ class GroupEssencePlugin(Star):
         super().__init__(context)
         self.settings = PluginSettings.from_mapping(config)
         data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_DATA_DIR
+        repository = EssenceRepository(
+            data_dir / "group_essence.db",
+            backup_dir=data_dir / "backups",
+        )
         self.service = GroupEssencePluginService(
             source=AstrBotEssenceSource(),
-            repository=EssenceRepository(data_dir / "group_essence.db"),
+            repository=repository,
             validation_detail_request_limit=(
                 self.settings.max_validation_detail_requests
             ),
             sync_detail_request_limit=self.settings.max_sync_detail_requests,
             history_query_limit=self.settings.history_query_limit,
+            detail_retry_base_minutes=self.settings.detail_retry_base_minutes,
+            detail_retry_max_hours=self.settings.detail_retry_max_hours,
         )
+        self.gateway = AstrBotOneBotGateway(
+            context,
+            self.settings.onebot_platform_id,
+        )
+        self.runtime = GroupEssenceRuntime(
+            service=self.service,
+            repository=repository,
+            action_context=self.gateway,
+            config=RuntimeConfig.from_settings(self.settings),
+            logger=logger,
+            health_path=data_dir / "ge_health.json",
+        )
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self) -> None:
+        block_reason = self.settings.scheduled_sync_block_reason
+        if self.settings.enable_scheduled_sync and block_reason:
+            logger.warning(
+                "GroupEssence 计划同步未启动："
+                f"category={block_reason}"
+            )
+        await self.runtime.start()
 
     @filter.command("精华验收")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -103,6 +136,7 @@ class GroupEssencePlugin(Star):
                 report,
                 validation_mode=self.settings.validation_mode,
                 allowed_group_count=len(self.settings.allowed_group_ids),
+                runtime=self.runtime.snapshot(),
             )
         )
 
@@ -144,7 +178,9 @@ class GroupEssencePlugin(Star):
             f"updated={report.updated}, refreshed={report.refreshed}, "
             f"unchanged={report.unchanged}, "
             f"sender_times_enriched={report.sender_times_enriched}, "
-            f"history_lookup_failed={report.history_lookup_failed}"
+            f"history_lookup_failed={report.history_lookup_failed}, "
+            f"detail_failures={report.detail_failures}, "
+            f"detail_deferred={report.detail_deferred}"
         )
         yield event.plain_result(format_sync_report(report))
 
@@ -280,4 +316,4 @@ class GroupEssencePlugin(Star):
         )
 
     async def terminate(self) -> None:
-        return None
+        await self.runtime.stop()

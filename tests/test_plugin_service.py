@@ -212,25 +212,72 @@ class PluginServiceTests(unittest.TestCase):
             self.assertEqual((report.updated, report.remaining), (1, 0))
             self.assertEqual(source.history_calls, 1)
 
-    def test_sync_skips_previously_failed_content_detail_ids(self) -> None:
+    def test_sync_defers_failed_details_until_retry_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repository = EssenceRepository(Path(temp) / "group_essence.db")
-            repository.init_db()
-            missing = make_message(content="[空消息]")
-            missing.raw_data = {
-                "essence": {"message_id": "message-1"},
-                "message_detail_error": "OneBot action=get_msg",
-            }
-            repository.upsert_messages([missing])
-            source = FakeSource([missing])
+
+            class FailingDetailSource(FakeSource):
+                async def get_essence_messages(
+                    self,
+                    context: object,
+                    group_id: str,
+                    *,
+                    detail_request_limit: int | None = None,
+                    skip_detail_ids: Iterable[str] = (),
+                ) -> list[EssenceMessage]:
+                    skipped = {str(value) for value in skip_detail_ids}
+                    message = make_message(content="[空消息]")
+                    message.raw_data = {
+                        "essence": {"message_id": "message-1", "content": []},
+                    }
+                    if "message-1" not in skipped:
+                        message.raw_data.update(
+                            {
+                                "message_detail_requested": True,
+                                "message_detail_error": "OneBot action=get_msg",
+                            }
+                        )
+                    self.messages = [message]
+                    return await super().get_essence_messages(
+                        context,
+                        group_id,
+                        detail_request_limit=detail_request_limit,
+                        skip_detail_ids=skipped,
+                    )
+
+            source = FailingDetailSource([])
             service = GroupEssencePluginService(
                 source=source,  # type: ignore[arg-type]
                 repository=repository,
             )
 
-            asyncio.run(service.sync(object(), "123456"))
+            first = asyncio.run(service.sync(object(), "123456"))
+            second = asyncio.run(service.sync(object(), "123456"))
 
             self.assertEqual(source.skip_detail_ids, {"message-1"})
+            self.assertEqual((first.detail_failures, first.detail_deferred), (1, 0))
+            self.assertEqual((second.detail_failures, second.detail_deferred), (0, 1))
+
+    def test_empty_successful_detail_response_is_also_backed_off(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = EssenceRepository(Path(temp) / "group_essence.db")
+            message = make_message(content="[空消息]")
+            message.raw_data = {
+                "essence": {"message_id": "message-1", "content": []},
+                "message_detail_requested": True,
+            }
+            service = GroupEssencePluginService(
+                source=FakeSource([message]),  # type: ignore[arg-type]
+                repository=repository,
+            )
+
+            report = asyncio.run(service.sync(object(), "123456"))
+
+            self.assertEqual(report.detail_failures, 1)
+            self.assertEqual(
+                repository.blocked_detail_retry_ids("123456"),
+                {"message-1"},
+            )
 
     def test_search_rejects_empty_keyword(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

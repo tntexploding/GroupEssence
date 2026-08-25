@@ -37,6 +37,10 @@ class FakeFilter:
     def platform_adapter_type(_: object):
         return lambda function: function
 
+    @staticmethod
+    def on_astrbot_loaded():
+        return lambda function: function
+
 
 class FakeStar:
     def __init__(self, context: object) -> None:
@@ -108,6 +112,8 @@ class FakeService:
             unchanged=0,
             sender_times_enriched=0,
             history_lookup_failed=False,
+            detail_failures=0,
+            detail_deferred=0,
         )
 
     async def repair_sender_times(
@@ -207,6 +213,44 @@ async def collect_results(generator: object) -> list[str]:
 
 
 class PluginEntryTests(unittest.TestCase):
+    def test_astrbot_lifecycle_starts_and_stops_the_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with load_plugin_main(Path(temp)) as plugin_main:
+                plugin = plugin_main.GroupEssencePlugin(
+                    object(),
+                    {
+                        "admin_ids": ["admin"],
+                        "allowed_group_ids": ["123456"],
+                        "validation_mode": False,
+                        "enable_scheduled_sync": True,
+                        "onebot_platform_id": "platform-1",
+                    },
+                )
+
+                class FakeRuntime:
+                    def __init__(self) -> None:
+                        self.start_calls = 0
+                        self.stop_calls = 0
+
+                    async def start(self) -> bool:
+                        self.start_calls += 1
+                        return True
+
+                    async def stop(self) -> None:
+                        self.stop_calls += 1
+
+                runtime = FakeRuntime()
+                plugin.runtime = runtime
+
+                async def scenario() -> None:
+                    await plugin.on_astrbot_loaded()
+                    await plugin.terminate()
+
+                asyncio.run(scenario())
+
+                self.assertEqual(runtime.start_calls, 1)
+                self.assertEqual(runtime.stop_calls, 1)
+
     def test_initialization_and_validation_command_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             data_root = Path(temp)

@@ -1,20 +1,23 @@
 # Group Essence Extractor
 
 一个面向 QQ 群精华消息的采集与检索工具。当前推荐的远端部署形态是 AstrBot
-插件：复用 AstrBot 与 NapCat 已有的 OneBot 连接，在 QQ 中完成只读验收、同步与
-查询，不增加 HTTP 端口或 NapCat Token。独立 CLI/API/OCR 仍保留，用于本地采集、
-离线维护和截图识别。
+插件：复用 AstrBot 与 NapCat 已有的 OneBot 连接，在 QQ 中完成只读验收、手动或
+计划同步与查询，不增加 HTTP 端口或 NapCat Token。独立 CLI/API/OCR 仍保留，用于
+本地采集、离线维护和截图识别。
 
 ## 功能
 
 - 可直接从仓库安装为 AstrBot 插件，提供 `/精华验收`、`/精华同步`、
   `/精华补全时间`、`/精华查询`、`/精华最近` 和 `/精华状态`。
 - 插件默认只读，只允许配置中的管理员与群白名单，所有匹配指令均阻止进入 LLM。
-- 插件通过当前 AIOCQHTTP 事件调用 OneBot Action，不保存 NapCat 地址或 Token。
+- 手动指令通过当前 AIOCQHTTP 事件调用 OneBot Action；可选后台任务通过配置的平台
+  ID 动态取得同一客户端，不保存消息事件、NapCat 地址或 Token。
 - 支持 NapCat / go-cqhttp 兼容的 `get_essence_msg_list` 接口。
-- 精华列表缺少正文时，通过有界的 `get_msg` 请求补全；已失败的旧消息不会在每次
-  同步中重复请求。新精华缺少发送时间时，只读取一次有界群历史元数据进行匹配；
-  已入库记录可由管理员显式补全。
+- 精华列表缺少正文时，通过有界的 `get_msg` 请求补全；失败消息按独立截止时间指数
+  退避，不会每轮重复请求，也不会永久跳过。新精华缺少发送时间时，只读取一次有界
+  群历史元数据进行匹配；已入库记录可由管理员显式补全。
+- 0.4.0 提供默认关闭的无人值守基础设施：单实例后台调度、超时与熔断式降频、持久化
+  运行状态、故障/恢复私聊告警、SQLite 在线备份和脱敏健康快照；这些路径不调用 LLM。
 - OneBot 失败或没有数据时，可扫描截图目录并使用 Tesseract OCR。
 - 可在不连接 NapCat、不创建数据库的情况下预览截图 OCR 质量。
 - 保存发送者、发送时间、精华时间、设置人、正文、图片地址和原始响应。
@@ -35,7 +38,7 @@
 - 使用 OCR 时：Tesseract OCR 和需要的语言包。中文默认使用 `chi_sim+eng`。
 
 独立应用中的 OneBot 与 OCR 可以只配置其中一种，默认优先 OneBot、失败后尝试
-OCR。AstrBot 插件第一版不加载 OCR、图片下载或独立 HTTP 依赖。
+OCR。AstrBot 插件不加载 OCR、图片下载或独立 HTTP 依赖。
 
 ## 安装
 
@@ -56,7 +59,7 @@ python -m pip install -e .
 ```
 
 独立 CLI/API/OCR 的运行时依赖由 `pyproject.toml` 管理。根目录
-`requirements.txt` 专供 AstrBot 插件安装流程，第一版插件路径没有额外 PyPI
+`requirements.txt` 专供 AstrBot 插件安装流程，插件路径没有额外 PyPI
 依赖。安装完成后验证命令入口：
 
 ```powershell
@@ -87,6 +90,8 @@ max_sync_detail_requests = 10
 history_query_limit = 100
 enable_image_enrichment = false
 enable_scheduled_sync = false
+onebot_platform_id = 空
+enable_automatic_backups = false
 ```
 
 先由管理员执行：
@@ -116,6 +121,34 @@ AstrBot 数据根目录下的
 `plugin_data/astrbot_plugin_group_essence/group_essence.db`，不会读写本仓库默认的
 `data/group_essence.db`。完整安装、验收、故障定位与回滚步骤见
 [`docs/ASTRBOT_DEPLOYMENT.md`](docs/ASTRBOT_DEPLOYMENT.md)。
+
+### 0.4.0 后台同步（默认关闭）
+
+只有手动同步连续两次、查询和重启持久化均通过后，才从 AstrBot 平台配置中取得目标
+AIOCQHTTP 实例的唯一 ID，并按下面的最小灰度配置启用后台任务：
+
+```text
+validation_mode = false
+allowed_group_ids = [先保留一个已验收群]
+onebot_platform_id = AIOCQHTTP 平台唯一 ID
+enable_scheduled_sync = true
+scheduled_sync_interval_minutes = 30
+scheduled_sync_startup_delay_seconds = 60
+scheduled_sync_timeout_seconds = 90
+scheduled_sync_failure_threshold = 3
+enable_failure_alerts = true
+enable_automatic_backups = true
+backup_interval_hours = 24
+backup_keep_daily = 7
+backup_keep_weekly = 4
+```
+
+插件只创建一个受监督任务，按白名单群串行同步。连续失败按指数退避；达到阈值后至少
+等待一个正常周期，并只在“持续失败”和“恢复”状态转换时向 `admin_ids` 私聊聚合信息。
+调度状态与单条 `get_msg` 重试截止时间保存在 schema v3 数据库中，AstrBot 重启不会
+清零。自动备份使用 SQLite 在线备份 API 并执行 `quick_check`，迁移前备份不受自动
+备份开关影响。脱敏健康快照写入同一插件数据目录的 `ge_health.json`，其中只有计数、
+时间和错误类别，不含群号、QQ 号、正文、URL 或 Token。
 
 ### 安装 Tesseract
 
@@ -197,7 +230,8 @@ essence init-db
 
 初始化会按 `PRAGMA user_version` 依次执行幂等迁移。输出中的 `from_version`、
 `to_version` 和 `applied` 可用于确认本次实际执行了哪些迁移；程序不会打开高于当前
-支持版本的数据库。
+支持版本的数据库。已有非空数据库升级前会先在同级 `backups/` 目录创建并校验在线
+快照，迁移失败时保留该快照供恢复。
 
 ### 执行一次采集
 
@@ -258,7 +292,8 @@ essence audit-db
 
 审计使用 SQLite 只读连接，不创建或修改数据库。输出包含快速完整性检查、记录总数、
 数据库版本、来源与内容类型分布、空字段、重复身份、发送/精华时间范围以及附件处理
-状态。schema v2 使用独立附件表，不改变原始 `image_path`。
+状态。schema v2 使用独立附件表；schema v3 增加后台同步状态与详情重试截止时间，
+不改变原始 `image_path`。
 
 ### 预览和修复旧数据
 
@@ -415,8 +450,8 @@ python -m pip check
 
 ## 已知限制
 
-- AstrBot 插件第一版只允许配置的管理员主动触发，不启用定时同步、图片补全或截图
-  OCR；这些能力仍由独立 CLI 提供。
+- 计划同步和自动备份仍是显式启用项；计划同步只串行处理白名单群，不执行自动历史
+  分页、图片补全或截图 OCR，后两项仍由独立 CLI 提供。
 - 截图 OCR 尚未进行界面区域分割；未覆盖的卡片布局、严重裁切或低清图片仍可能需要
   新增解析策略。
 - 已失效或需要额外登录态的 OneBot 图片地址会记录为失败，需在可访问图片的环境重试。

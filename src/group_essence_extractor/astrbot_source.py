@@ -20,7 +20,7 @@ from .normalization import (
 ActionCaller = Callable[..., Awaitable[Any]]
 
 
-class AstrBotEventLike(Protocol):
+class AstrBotActionContextLike(Protocol):
     bot: Any
 
 
@@ -74,7 +74,7 @@ def unwrap_action_result(result: Any, *, action: str = "unknown") -> Any:
 class AstrBotEssenceSource:
     async def get_essence_messages(
         self,
-        event: AstrBotEventLike,
+        action_context: AstrBotActionContextLike | Any,
         group_id: str,
         *,
         detail_request_limit: int | None = None,
@@ -84,7 +84,7 @@ class AstrBotEssenceSource:
         if not normalized_group_id:
             raise ValueError("调用 OneBot Action 时必须提供目标群")
 
-        call_action = _resolve_action_caller(event)
+        call_action = _resolve_action_caller(action_context)
         group_parameter: str | int = (
             int(normalized_group_id)
             if normalized_group_id.isdigit()
@@ -136,8 +136,13 @@ class AstrBotEssenceSource:
                     "get_msg",
                     message_id=message_id,
                 )
-                if isinstance(detail, Mapping):
-                    details[message_id] = detail
+                if not isinstance(detail, Mapping):
+                    raise OneBotActionError(
+                        "get_msg",
+                        status="invalid_data",
+                        wording="data is not an object",
+                    )
+                details[message_id] = detail
             except OneBotActionError as exc:
                 detail_errors[message_id] = exc.public_message
 
@@ -151,7 +156,7 @@ class AstrBotEssenceSource:
 
     async def get_group_history_times(
         self,
-        event: AstrBotEventLike,
+        action_context: AstrBotActionContextLike | Any,
         group_id: str,
         *,
         limit: int,
@@ -161,7 +166,7 @@ class AstrBotEssenceSource:
         if not normalized_group_id:
             raise ValueError("调用 OneBot Action 时必须提供目标群")
 
-        call_action = _resolve_action_caller(event)
+        call_action = _resolve_action_caller(action_context)
         group_parameter: str | int = (
             int(normalized_group_id)
             if normalized_group_id.isdigit()
@@ -290,8 +295,12 @@ def _unique_record_index(
     return index
 
 
-def _resolve_action_caller(event: AstrBotEventLike) -> ActionCaller:
-    bot = getattr(event, "bot", None)
+def _resolve_action_caller(action_context: AstrBotActionContextLike | Any) -> ActionCaller:
+    direct_call_action = getattr(action_context, "call_action", None)
+    if callable(direct_call_action):
+        return direct_call_action
+
+    bot = getattr(action_context, "bot", None)
     api = getattr(bot, "api", None)
     if api is None:
         api = getattr(bot, "_api", None)

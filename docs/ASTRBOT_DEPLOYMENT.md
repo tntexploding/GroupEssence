@@ -1,9 +1,9 @@
 # AstrBot 远端部署与验收
 
 本项目可直接作为 AstrBot 插件安装。插件复用 AstrBot 已经建立的
-NapCat/AIOCQHTTP（OneBot v11）连接，通过当前消息事件调用 OneBot Action；不启动
-FastAPI/Uvicorn，不新增监听端口，也不读取 `ONEBOT_BASE_URL` 或
-`ONEBOT_ACCESS_TOKEN`。
+NapCat/AIOCQHTTP（OneBot v11）连接：手动命令通过当前消息事件调用 OneBot Action，
+可选计划任务按平台 ID 动态取得同一客户端；不启动 FastAPI/Uvicorn，不新增监听
+端口，也不读取 `ONEBOT_BASE_URL` 或 `ONEBOT_ACCESS_TOKEN`。
 
 ## 1. 部署前检查
 
@@ -53,12 +53,14 @@ src/
   "max_query_results": 5,
   "max_content_chars": 300,
   "enable_image_enrichment": false,
-  "enable_scheduled_sync": false
+  "enable_scheduled_sync": false,
+  "onebot_platform_id": "",
+  "enable_automatic_backups": false
 }
 ```
 
 `allowed_group_ids` 为空时会拒绝所有群；私聊命令只有在
-`default_group_id` 同时位于白名单时才有目标群。第一版所有指令都只允许
+`default_group_id` 同时位于白名单时才有目标群。当前所有指令都只允许
 `admin_ids` 中的账号。
 
 使用测试管理员执行：
@@ -104,8 +106,8 @@ NapCat 可能不在精华列表中提供历史 `sender_time`，且旧消息已�
 
 第一次同步可以出现 `新增` 或 `更新`；没有新精华时，紧接着的第二次同步应主要为
 `未变化`，不能再次新增同一批记录。OneBot 原始结构或短期图片地址变化只计入
-`元数据刷新`。同步的正文详情请求受 `max_sync_detail_requests` 限制，并跳过数据库中
-已经记录失败的旧消息，避免每次同步重复请求同一批历史详情。
+`元数据刷新`。同步的正文详情请求受 `max_sync_detail_requests` 限制；失败消息按独立
+截止时间指数退避，到期后重新尝试，避免每次同步重复请求，也不会永久跳过。
 
 对新发现且缺少发送时间的精华，同步最多调用一次 `get_group_msg_history`，并只保留
 消息 ID、序号、随机号和时间用于匹配；群历史正文和发送者不会进入时间索引或回复。
@@ -122,9 +124,56 @@ plugin_data/astrbot_plugin_group_essence/group_essence.db
 ```
 
 它不位于插件源码目录，也不使用本仓库的 `data/group_essence.db`。完成一次同步后重启
-AstrBot，再执行 `/精华最近 5`，确认数据卷中的记录仍可读取。
+AstrBot，再执行 `/精华最近 5`，确认数据卷中的记录仍可读取。0.4.0 首次打开已有
+schema v2 数据库时，会先在 `backups/` 创建经 `quick_check` 验证的迁移前快照，再升级
+到 schema v3。
 
-## 5. 故障定位
+## 5. 阶段 C：计划同步与自动备份灰度
+
+阶段 B 全部通过后，从 AstrBot WebUI 的消息平台配置中复制目标 AIOCQHTTP 实例的
+唯一 ID。它不是 NapCat Token。先只保留一个已验收群，并设置：
+
+```json
+{
+  "validation_mode": false,
+  "onebot_platform_id": "AIOCQHTTP 平台唯一 ID",
+  "enable_scheduled_sync": true,
+  "scheduled_sync_interval_minutes": 30,
+  "scheduled_sync_startup_delay_seconds": 60,
+  "scheduled_sync_timeout_seconds": 90,
+  "scheduled_sync_jitter_percent": 10,
+  "scheduled_sync_failure_threshold": 3,
+  "scheduled_sync_retry_base_seconds": 30,
+  "scheduled_sync_max_backoff_minutes": 60,
+  "detail_retry_base_minutes": 15,
+  "detail_retry_max_hours": 24,
+  "enable_failure_alerts": true,
+  "enable_automatic_backups": true,
+  "backup_interval_hours": 24,
+  "backup_keep_daily": 7,
+  "backup_keep_weekly": 4
+}
+```
+
+重新加载插件后执行 `/精华状态`，预期“计划同步：运行中”且显示下次运行时间；等待
+一个周期后再次检查，应出现上次自动成功时间。后台任务只按白名单群串行执行，不保留
+触发事件、不调用 LLM。连续失败达到阈值时仅私聊 `admin_ids` 一次，恢复时再私聊一次；
+错误正文、Action 参数和 OneBot payload 不会进入告警。告警发送失败不会阻塞同步，也不会
+被标记为已送达；只要失败状态持续，后续降频周期会继续尝试。
+
+运行文件位于：
+
+```text
+plugin_data/astrbot_plugin_group_essence/group_essence.db
+plugin_data/astrbot_plugin_group_essence/backups/
+plugin_data/astrbot_plugin_group_essence/ge_health.json
+```
+
+`ge_health.json` 应只含状态、时间、计数和错误类别，不应出现群号、QQ 号、正文、URL
+或 Token。自动备份使用 SQLite 在线备份 API；不要用直接复制运行中数据库文件替代。
+完成至少一个同步周期和一个备份周期前，不增加白名单群数量。
+
+## 6. 故障定位
 
 远端反馈只保留以下信息：
 
@@ -132,6 +181,7 @@ AstrBot，再执行 `/精华最近 5`，确认数据卷中的记录仍可读取�
 - 失败的指令和 action 名称；
 - OneBot `status`、`retcode` 及脱敏 wording；
 - 采集数量、缺失计数、详情补全失败计数；
+- 计划任务是否运行、连续失败数、下次运行时间和最近备份时间；
 - 时间补全扫描、匹配、更新和剩余数量；
 - 异常类别和数据库 schema 版本。
 
@@ -140,18 +190,21 @@ OneBot JSON、数据库路径或数据库文件。插件没有单独的 HTTP 地
 `get_essence_msg_list` 不可用，应先检查 AstrBot 当前 AIOCQHTTP 适配器和 NapCat
 版本，而不是为插件新增 HTTP 监听。
 
-## 6. 回滚
+## 7. 回滚
 
 1. 在 AstrBot WebUI 禁用插件，确认普通对话与其他插件恢复正常。
 2. 保留 `plugin_data/astrbot_plugin_group_essence/`，不要通过删库解决兼容问题。
-3. 回退插件版本；重新启用前确认旧版支持数据库当前的 `PRAGMA user_version`。
-4. 如需采集现场信息，只复制脱敏后的聚合统计，不复制数据卷内容。
+3. schema v3 迁移前快照位于 `backups/pre-migration-*.db`；先保留当前数据库与全部
+   备份，再决定是否恢复，不要覆盖唯一副本。
+4. 回退插件版本；重新启用前确认旧版支持数据库当前的 `PRAGMA user_version`。
+5. 如需采集现场信息，只复制脱敏后的聚合统计，不复制数据卷内容。
 
 当前 schema 版本由核心迁移代码管理。更新插件不会自动删除数据；禁用插件也不会
 删除持久化目录。
 
-## 7. 本轮边界
+## 8. 本轮边界
 
-远端先完成阶段 A、B。当前发送时间修复只检查单次有界群历史，不自动分页追溯全部
-历史。截图 OCR、OneBot 图片下载、计划同步和普通成员查询仍保持关闭。独立 CLI/API
-只用于离线维护；只有未来出现 AstrBot 之外的远程调用方时，才评估部署额外服务。
+远端必须按阶段 A、B、C 依次灰度；新安装和升级后计划同步、自动备份默认保持关闭。
+当前发送时间修复只检查单次有界群历史，不自动分页追溯全部历史。截图 OCR、OneBot
+图片下载和普通成员查询仍保持关闭。独立 CLI/API 只用于离线维护；只有未来出现
+AstrBot 之外的远程调用方时，才评估部署额外服务。

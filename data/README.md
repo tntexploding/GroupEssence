@@ -6,6 +6,8 @@
 - `screenshots/`：等待 OCR 导入的 QQ 精华消息截图；可先用 `ocr-preview` 做只读预检。
 - `images/`：OneBot 图片的 SHA-256 去重缓存，由 `enrich-images --apply` 管理。
 - `exports/`：通过 `essence export` 生成的 JSON/CSV 文件。
+- `backups/`：数据库 schema 升级前的 SQLite 在线快照；AstrBot 插件的自动备份则位于
+  其专用 `plugin_data` 目录，而不是本地 `data/`。
 
 请勿在这里存放需要随源码发布的资源。可公开、已脱敏的测试样本应放在
 `tests/fixtures/`，文档配图应放在 `docs/assets/`。令牌、账号配置等敏感信息只应
