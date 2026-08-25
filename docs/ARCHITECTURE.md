@@ -18,6 +18,7 @@ SQLite，并通过 AstrBot 插件、CLI 和 HTTP API 复用相同的标准化与
 | `astrbot_source.py` | 通过事件或后台网关异步调用 OneBot Action |
 | `astrbot_gateway.py` | 按平台 ID 动态解析 AIOCQHTTP 客户端，不持有消息事件 |
 | `plugin_config.py` | 解析插件配置并执行管理员、群白名单授权 |
+| `plugin_identity.py` | 统一插件标识与持久化目录，并兼容 0.4.x 数据路径 |
 | `plugin_service.py` | 编排只读验收、同步、详情重试、查询、状态和并发控制 |
 | `runtime.py` | 管理单实例后台任务、超时退避、告警、备份和健康快照 |
 | `ocr.py` | 调用 Tesseract，自适应选择原图或低置信度灰度兜底结果 |
@@ -96,7 +97,7 @@ SQLite 工作全部通过 `asyncio.to_thread` 执行，
 
 ### 无人值守运行时
 
-0.4.0 的 `GroupEssenceRuntime` 由 `on_astrbot_loaded` 启动并由插件 `terminate` 取消，
+`GroupEssenceRuntime` 由 `on_astrbot_loaded` 启动并由插件 `terminate` 取消，
 同一插件实例最多拥有一个任务。它按群白名单排序串行执行同步，单群使用硬超时；失败
 采用指数退避，达到阈值后至少等待一个正常同步周期，相当于打开降频熔断。成功后的
 正常间隔带有有界抖动，避免固定时刻请求。
@@ -112,9 +113,11 @@ SQLite 工作全部通过 `asyncio.to_thread` 执行，
 状态、时间、计数和错误类别，不包含群 ID、管理员 ID 或消息数据。所有新后台能力默认
 关闭，缺少平台 ID、白名单或仍处于验收模式时不会启动计划同步。
 
-插件数据目录固定为 AstrBot 数据根目录下的
-`plugin_data/astrbot_plugin_group_essence/`。源码目录、本仓库 `data/` 和当前工作目录
-都不是插件持久化位置。
+新安装的插件数据目录为 AstrBot 数据根目录下的
+`plugin_data/astrbot_plugin_groupessence/`。从 0.4.x 升级时，如果新目录尚不存在而
+`plugin_data/astrbot_plugin_group_essence/` 已存在，插件继续使用旧目录；如果两者都
+存在则优先新目录。解析过程只检查路径，不创建或移动目录。源码目录、本仓库 `data/`
+和当前工作目录都不是插件持久化位置。
 
 ### OCR 回退
 

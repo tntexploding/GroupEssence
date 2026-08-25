@@ -1,9 +1,8 @@
-# Group Essence Extractor
+# astrbot_plugin_groupessence
 
-一个面向 QQ 群精华消息的采集与检索工具。当前推荐的远端部署形态是 AstrBot
-插件：复用 AstrBot 与 NapCat 已有的 OneBot 连接，在 QQ 中完成只读验收、手动或
-计划同步与查询，不增加 HTTP 端口或 NapCat Token。独立 CLI/API/OCR 仍保留，用于
-本地采集、离线维护和截图识别。
+一个面向 QQ 群精华消息的 AstrBot 插件。它复用 AstrBot 与 NapCat 已有的 OneBot
+连接，在 QQ 中完成只读验收、手动或计划同步与查询，不增加 HTTP 端口或 NapCat
+Token。仓库同时保留独立 CLI/API/OCR，供本地采集、离线维护和截图识别使用。
 
 ## 功能
 
@@ -16,7 +15,7 @@
 - 精华列表缺少正文时，通过有界的 `get_msg` 请求补全；失败消息按独立截止时间指数
   退避，不会每轮重复请求，也不会永久跳过。新精华缺少发送时间时，只读取一次有界
   群历史元数据进行匹配；已入库记录可由管理员显式补全。
-- 0.4.0 提供默认关闭的无人值守基础设施：单实例后台调度、超时与熔断式降频、持久化
+- 提供默认关闭的无人值守基础设施：单实例后台调度、超时与熔断式降频、持久化
   运行状态、故障/恢复私聊告警、SQLite 在线备份和脱敏健康快照；这些路径不调用 LLM。
 - OneBot 失败或没有数据时，可扫描截图目录并使用 Tesseract OCR。
 - 可在不连接 NapCat、不创建数据库的情况下预览截图 OCR 质量。
@@ -74,9 +73,13 @@ python -m group_essence_extractor.cli --help
 
 ## AstrBot 插件部署
 
-在 AstrBot WebUI 的插件管理页使用本仓库地址安装，或上传根目录同时包含
+在 AstrBot WebUI 的插件管理页使用以下仓库地址安装，或上传根目录同时包含
 `main.py`、`metadata.yaml`、`_conf_schema.json`、`requirements.txt` 和 `src/` 的
 插件压缩包。插件配置来自 AstrBot，不读取 `.env`。
+
+```text
+https://github.com/tntexploding/astrbot_plugin_groupessence
+```
 
 首次安装必须保持：
 
@@ -118,11 +121,15 @@ enable_automatic_backups = false
 “元数据刷新”，不应误报业务记录更新。`/精华补全时间` 只读取群历史中的消息身份和
 时间，按消息 ID 或无歧义序号匹配，绝不使用精华设置时间代填。插件数据库按需位于
 AstrBot 数据根目录下的
-`plugin_data/astrbot_plugin_group_essence/group_essence.db`，不会读写本仓库默认的
+`plugin_data/astrbot_plugin_groupessence/group_essence.db`，不会读写本仓库默认的
 `data/group_essence.db`。完整安装、验收、故障定位与回滚步骤见
 [`docs/ASTRBOT_DEPLOYMENT.md`](docs/ASTRBOT_DEPLOYMENT.md)。
 
-### 0.4.0 后台同步（默认关闭）
+从 0.4.x 升级时，插件会在新目录尚不存在的情况下继续使用旧的
+`plugin_data/astrbot_plugin_group_essence/`，不会自动移动或重建数据库；配置文件因
+插件标识变化需要按部署文档复制一次。不要同时启用新旧两个插件副本。
+
+### 后台同步（默认关闭）
 
 只有手动同步连续两次、查询和重启持久化均通过后，才从 AstrBot 平台配置中取得目标
 AIOCQHTTP 实例的唯一 ID，并按下面的最小灰度配置启用后台任务：
@@ -419,6 +426,7 @@ Content-Type: application/json
 ```text
 main.py                       AstrBot 插件命令入口
 metadata.yaml                 AstrBot 插件元数据
+logo.png                      AstrBot 插件 Logo（256×256，透明背景）
 _conf_schema.json             AstrBot WebUI 配置结构
 src/group_essence_extractor/  Python 包与运行逻辑
 tests/                        自动测试；公开且脱敏的夹具放 tests/fixtures/

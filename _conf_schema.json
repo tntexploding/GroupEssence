@@ -9,13 +9,15 @@
     "description": "插件管理员 QQ 号",
     "type": "list",
     "hint": "只有精确匹配此列表的账号可以使用插件指令。",
-    "default": ["2573423682"]
+    "default": ["2573423682"],
+    "obvious_hint": true
   },
   "allowed_group_ids": {
     "description": "允许访问的群号",
     "type": "list",
     "hint": "必须显式填写；空列表拒绝所有目标群。",
-    "default": []
+    "default": [],
+    "obvious_hint": true
   },
   "default_group_id": {
     "description": "私聊默认群号",
@@ -68,7 +70,8 @@
     "description": "OneBot 平台 ID",
     "type": "string",
     "hint": "填写 AstrBot 平台配置中 AIOCQHTTP/NapCat 实例的唯一 ID；计划同步不会保存消息事件。",
-    "default": ""
+    "default": "",
+    "obvious_hint": true
   },
   "scheduled_sync_interval_minutes": {
     "description": "计划同步间隔（分钟）",

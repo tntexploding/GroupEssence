@@ -159,9 +159,10 @@ def unwrap_action_result(result: Any) -> Any:
 为了让 AstrBot 能直接从 Git 仓库安装，最终插件入口应位于仓库根目录：
 
 ```text
-GroupEssence/
+astrbot_plugin_groupessence/
 ├─ main.py                         # AstrBot 插件入口，只做编排
 ├─ metadata.yaml
+├─ logo.png                        # 256×256 透明插件 Logo
 ├─ _conf_schema.json
 ├─ requirements.txt                # 仅列插件运行必需依赖
 ├─ src/
@@ -180,9 +181,9 @@ GroupEssence/
 不要在 `main.py` 中使用 `sys.path.insert`。入口应使用包内相对导入，或者在最终拆分
 为独立插件仓库时把 GroupEssence 核心作为正常 Python 包安装。
 
-AstrBot 会读取插件根目录的 `requirements.txt`。当前文件包含 FastAPI、Pydantic、
-Uvicorn、Pillow 等完整应用依赖，直接让 AstrBot 安装这些固定版本可能与 AstrBot
-自身依赖冲突。改写时应：
+AstrBot 会读取插件根目录的 `requirements.txt`。当前插件运行路径只使用 Python
+标准库和 AstrBot 已提供的 API，因此该文件不声明第三方包；FastAPI、Pydantic、
+Uvicorn、Pillow 等独立应用依赖只由 `pyproject.toml` 管理。后续维护时应继续：
 
 - 让插件运行路径只使用 Python 标准库和 AstrBot 已提供的 API；
 - 将 CLI/HTTP/OCR 的完整开发安装改为 `pip install -e .` 或 pyproject extras；
@@ -368,7 +369,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 data_dir = (
     Path(get_astrbot_data_path())
     / "plugin_data"
-    / "astrbot_plugin_group_essence"
+    / "astrbot_plugin_groupessence"
 )
 db_path = data_dir / "group_essence.db"
 image_dir = data_dir / "images"
@@ -379,10 +380,12 @@ image_dir = data_dir / "images"
 - 插件源码目录；
 - 容器临时目录；
 - 当前工作目录推导出的 `./data`；
-- GroupEssence Git 仓库中的 `data/`。
+- `astrbot_plugin_groupessence` Git 仓库中的 `data/`。
 
 部署更新前只需保护 AstrBot 的数据卷；禁用或替换插件时不得删除上述目录。数据库
 升级继续使用现有 `PRAGMA user_version` 迁移，不通过手工 SQL 修改生产数据库。
+0.4.x 的旧目录 `plugin_data/astrbot_plugin_group_essence/` 只作为升级兼容路径：新目录
+不存在且旧目录存在时继续使用旧目录，不在运行时自动移动生产数据库。
 
 ## 9. 日志与隐私
 
@@ -505,7 +508,8 @@ AstrBot 入口测试可在 AstrBot 开发环境中运行；核心测试环境不
 
 1. 在 AstrBot WebUI 禁用插件；
 2. 确认普通 QQ 对话和其他插件恢复正常；
-3. 保留 `data/plugin_data/astrbot_plugin_group_essence/`；
+3. 保留 `data/plugin_data/astrbot_plugin_groupessence/`；若从 0.4.x 升级，也保留旧的
+   `data/plugin_data/astrbot_plugin_group_essence/`；
 4. 回退插件代码版本；
 5. 只有确认旧版本支持当前 `PRAGMA user_version` 后才重新启用。
 

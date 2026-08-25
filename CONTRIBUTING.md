@@ -87,7 +87,8 @@ AstrBot 模块，不安装或连接真实 AstrBot/NapCat。测试必须覆盖管
 - 配置模板写入 `example.env`，本机值写入 `.env`。
 - CI、Issue 和 Pull Request 配置放在 `.github/`，必须纳入版本控制。
 - AstrBot 插件入口与元数据放在仓库根目录；插件持久化数据必须使用 AstrBot 数据根
-  目录下的 `plugin_data/astrbot_plugin_group_essence/`，不得写入源码目录。
+  目录下的 `plugin_data/astrbot_plugin_groupessence/`，不得写入源码目录。旧目录名只用于
+  0.4.x 升级兼容，不得在新代码中新增硬编码。
 - `requirements.txt` 只列 AstrBot 插件额外依赖；独立 CLI/API/OCR 依赖由
   `pyproject.toml` 管理。
 

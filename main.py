@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -14,6 +12,10 @@ from .src.group_essence_extractor.astrbot_source import (
 from .src.group_essence_extractor.astrbot_gateway import AstrBotOneBotGateway
 from .src.group_essence_extractor.db import EssenceRepository
 from .src.group_essence_extractor.plugin_config import PluginSettings
+from .src.group_essence_extractor.plugin_identity import (
+    PLUGIN_DATABASE_FILENAME,
+    resolve_plugin_data_dir,
+)
 from .src.group_essence_extractor.plugin_service import (
     GroupEssencePluginService,
     PluginServiceError,
@@ -28,10 +30,6 @@ from .src.group_essence_extractor.runtime import (
     RuntimeConfig,
 )
 
-
-PLUGIN_DATA_DIR = "astrbot_plugin_group_essence"
-
-
 class GroupEssencePlugin(Star):
     def __init__(
         self,
@@ -40,9 +38,9 @@ class GroupEssencePlugin(Star):
     ) -> None:
         super().__init__(context)
         self.settings = PluginSettings.from_mapping(config)
-        data_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_DATA_DIR
+        data_dir = resolve_plugin_data_dir(get_astrbot_data_path())
         repository = EssenceRepository(
-            data_dir / "group_essence.db",
+            data_dir / PLUGIN_DATABASE_FILENAME,
             backup_dir=data_dir / "backups",
         )
         self.service = GroupEssencePluginService(

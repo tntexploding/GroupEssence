@@ -21,7 +21,7 @@ NapCat/AIOCQHTTP（OneBot v11）连接：手动命令通过当前消息事件调
 优先在 AstrBot WebUI 的插件管理页使用仓库地址安装：
 
 ```text
-https://github.com/tntexploding/GroupEssence
+https://github.com/tntexploding/astrbot_plugin_groupessence
 ```
 
 如果当前 AstrBot 版本只支持上传插件压缩包，压缩包根目录必须直接包含：
@@ -36,6 +36,26 @@ src/
 
 不要只上传 `src/group_essence_extractor/`，也不要在插件目录中创建 `.env`。安装或更新
 后，通过 WebUI 重新加载插件；若热重载未生效，再重启 AstrBot 容器一次。
+
+### 从 0.4.x 升级到 0.5.0
+
+0.5.0 将插件标识从 `astrbot_plugin_group_essence` 调整为分发名称
+`astrbot_plugin_groupessence`。升级前先禁用旧插件并备份 AstrBot 数据卷，不要让两个
+插件目录同时启用。
+
+AstrBot 按插件标识保存配置，因此应在首次加载新版本前，将旧配置文件复制为新名称，
+同时保留旧文件用于回滚：
+
+```text
+data/config/astrbot_plugin_group_essence_config.json
+  -> data/config/astrbot_plugin_groupessence_config.json
+```
+
+如果目标文件已存在，不要覆盖；应在 WebUI 中逐项核对并迁移管理员、群白名单和计划
+任务配置。数据库不需要改名或重新导入：当新目录尚不存在而旧目录存在时，插件会继续
+使用旧的 `plugin_data/astrbot_plugin_group_essence/`。若新旧数据目录同时存在，插件
+优先使用新目录；此时应保持插件禁用并人工确认哪一份数据库是当前数据，不能合并或
+覆盖唯一副本。完成升级后先执行 `/精华状态`，再按本文阶段 A、B、C 重新验收。
 
 ## 3. 阶段 A：只读契约验收
 
@@ -120,13 +140,13 @@ NapCat 可能不在精华列表中提供历史 `sender_time`，且旧消息已�
 数据库按需创建在 AstrBot 数据根目录下：
 
 ```text
-plugin_data/astrbot_plugin_group_essence/group_essence.db
+plugin_data/astrbot_plugin_groupessence/group_essence.db
 ```
 
 它不位于插件源码目录，也不使用本仓库的 `data/group_essence.db`。完成一次同步后重启
-AstrBot，再执行 `/精华最近 5`，确认数据卷中的记录仍可读取。0.4.0 首次打开已有
+AstrBot，再执行 `/精华最近 5`，确认数据卷中的记录仍可读取。自 0.4.0 起，首次打开已有
 schema v2 数据库时，会先在 `backups/` 创建经 `quick_check` 验证的迁移前快照，再升级
-到 schema v3。
+到 schema v3。从 0.4.x 升级且继续使用旧数据目录时，实际路径仍为上一节所列兼容路径。
 
 ## 5. 阶段 C：计划同步与自动备份灰度
 
@@ -164,9 +184,9 @@ schema v2 数据库时，会先在 `backups/` 创建经 `quick_check` 验证的�
 运行文件位于：
 
 ```text
-plugin_data/astrbot_plugin_group_essence/group_essence.db
-plugin_data/astrbot_plugin_group_essence/backups/
-plugin_data/astrbot_plugin_group_essence/ge_health.json
+plugin_data/astrbot_plugin_groupessence/group_essence.db
+plugin_data/astrbot_plugin_groupessence/backups/
+plugin_data/astrbot_plugin_groupessence/ge_health.json
 ```
 
 `ge_health.json` 应只含状态、时间、计数和错误类别，不应出现群号、QQ 号、正文、URL
@@ -193,7 +213,8 @@ OneBot JSON、数据库路径或数据库文件。插件没有单独的 HTTP 地
 ## 7. 回滚
 
 1. 在 AstrBot WebUI 禁用插件，确认普通对话与其他插件恢复正常。
-2. 保留 `plugin_data/astrbot_plugin_group_essence/`，不要通过删库解决兼容问题。
+2. 保留 `plugin_data/astrbot_plugin_groupessence/`；若由 0.4.x 升级，也保留兼容使用的
+   `plugin_data/astrbot_plugin_group_essence/`，不要通过删库解决兼容问题。
 3. schema v3 迁移前快照位于 `backups/pre-migration-*.db`；先保留当前数据库与全部
    备份，再决定是否恢复，不要覆盖唯一副本。
 4. 回退插件版本；重新启用前确认旧版支持数据库当前的 `PRAGMA user_version`。

@@ -1,2 +1,2 @@
-# AstrBot 插件运行路径仅使用 Python 标准库和 AstrBot 已提供的 API。
+# astrbot_plugin_groupessence 运行路径仅使用 Python 标准库和 AstrBot 已提供的 API。
 # 独立 CLI/API/OCR 开发环境请运行：python -m pip install -e .
