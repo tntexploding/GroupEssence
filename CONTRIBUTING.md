@@ -7,11 +7,12 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-运行时依赖只在 `pyproject.toml` 中维护，`requirements.txt` 负责安装当前项目，
-不要在两处重复添加版本清单。
+独立应用依赖只在 `pyproject.toml` 中维护；根目录 `requirements.txt` 仅声明 AstrBot
+插件运行路径的额外依赖，不得把 FastAPI、Pydantic、Pillow 或 AstrBot 自身版本固定
+到其中。
 
 ## 开发流程
 

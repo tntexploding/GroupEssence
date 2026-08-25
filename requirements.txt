@@ -1,3 +1,2 @@
-# 兼容仍使用 requirements.txt 的安装流程。
-# 运行时依赖统一维护在 pyproject.toml，避免重复清单发生漂移。
--e .
+# AstrBot 插件运行路径仅使用 Python 标准库和 AstrBot 已提供的 API。
+# 独立 CLI/API/OCR 开发环境请运行：python -m pip install -e .

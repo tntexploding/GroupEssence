@@ -35,7 +35,7 @@ Windows PowerShell：
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 Linux / macOS：
@@ -43,11 +43,12 @@ Linux / macOS：
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-`requirements.txt` 会以 editable 模式安装当前项目，运行时依赖统一由
-`pyproject.toml` 管理。安装完成后验证命令入口：
+独立 CLI/API/OCR 的运行时依赖由 `pyproject.toml` 管理。根目录
+`requirements.txt` 专供 AstrBot 插件安装流程，第一版插件路径没有额外 PyPI
+依赖。安装完成后验证命令入口：
 
 ```powershell
 essence --help

@@ -1,0 +1,49 @@
+{
+  "validation_mode": {
+    "description": "只读验收模式",
+    "type": "bool",
+    "hint": "开启时只允许验收和状态指令，不创建或写入数据库。",
+    "default": true
+  },
+  "admin_ids": {
+    "description": "插件管理员 QQ 号",
+    "type": "list",
+    "hint": "只有精确匹配此列表的账号可以使用插件指令。",
+    "default": ["2573423682"]
+  },
+  "allowed_group_ids": {
+    "description": "允许访问的群号",
+    "type": "list",
+    "hint": "必须显式填写；空列表拒绝所有目标群。",
+    "default": []
+  },
+  "default_group_id": {
+    "description": "私聊默认群号",
+    "type": "string",
+    "hint": "必须同时存在于允许访问的群号列表中。",
+    "default": ""
+  },
+  "max_query_results": {
+    "description": "单次查询最多返回数量",
+    "type": "int",
+    "hint": "代码会将该值限制在 1 到 20。",
+    "default": 5
+  },
+  "max_content_chars": {
+    "description": "单条正文最大呈递字符数",
+    "type": "int",
+    "default": 300
+  },
+  "enable_image_enrichment": {
+    "description": "启用图片补全",
+    "type": "bool",
+    "hint": "第一版插件不执行图片下载或 OCR，请保持关闭。",
+    "default": false
+  },
+  "enable_scheduled_sync": {
+    "description": "启用计划同步",
+    "type": "bool",
+    "hint": "第一版仅支持管理员主动指令，请保持关闭。",
+    "default": false
+  }
+}
