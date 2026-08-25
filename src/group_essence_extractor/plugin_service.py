@@ -4,10 +4,11 @@ import asyncio
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from .astrbot_source import AstrBotEssenceSource
-from .db import EssenceRepository
+from .db import EssenceRepository, SaveStats, SearchPage
 from .models import EssenceMessage
 from .normalization import needs_message_detail
 
@@ -37,6 +38,14 @@ class StatusReport:
     schema_version: int | None = None
 
 
+@dataclass(frozen=True)
+class SyncReport:
+    collected: int
+    inserted: int
+    updated: int
+    unchanged: int
+
+
 class PluginServiceError(RuntimeError):
     def __init__(self, public_message: str, category: str) -> None:
         self.public_message = public_message
@@ -59,6 +68,39 @@ class GroupEssencePluginService:
             messages = await self.source.get_essence_messages(event, group_id)
         return build_validation_report(messages)
 
+    async def sync(self, event: Any, group_id: str) -> SyncReport:
+        normalized_group_id = _require_group_id(group_id)
+        async with self.operation_lock:
+            messages = await self.source.get_essence_messages(event, normalized_group_id)
+            try:
+                stats = await asyncio.to_thread(self._persist_messages, messages)
+            except Exception as exc:
+                raise PluginServiceError("数据库同步失败。", type(exc).__name__) from None
+        return SyncReport(
+            collected=len(messages),
+            inserted=stats.inserted,
+            updated=stats.updated,
+            unchanged=stats.unchanged,
+        )
+
+    async def search(self, group_id: str, keyword: str, limit: int) -> SearchPage:
+        normalized_group_id = _require_group_id(group_id)
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword:
+            raise PluginServiceError("查询关键词不能为空。", "empty_keyword")
+        return await self._search_page(
+            group_id=normalized_group_id,
+            content=normalized_keyword,
+            limit=limit,
+        )
+
+    async def recent(self, group_id: str, limit: int) -> SearchPage:
+        return await self._search_page(
+            group_id=_require_group_id(group_id),
+            content="",
+            limit=limit,
+        )
+
     async def status(self) -> StatusReport:
         if not self.repository.db_path.is_file():
             return StatusReport(database_exists=False)
@@ -74,6 +116,32 @@ class GroupEssencePluginService:
             total=int(audit.get("total") or 0),
             schema_version=int(audit.get("schema_version") or 0),
         )
+
+    def _persist_messages(self, messages: list[EssenceMessage]) -> SaveStats:
+        self.repository.init_db()
+        return self.repository.upsert_messages(messages)
+
+    async def _search_page(
+        self,
+        *,
+        group_id: str,
+        content: str,
+        limit: int,
+    ) -> SearchPage:
+        normalized_limit = _clamp_limit(limit)
+        if not self.repository.db_path.is_file():
+            return SearchPage(items=[], total=0, limit=normalized_limit, offset=0)
+        async with self.operation_lock:
+            try:
+                return await asyncio.to_thread(
+                    self.repository.search_page,
+                    group_id=group_id,
+                    content=content,
+                    limit=normalized_limit,
+                    offset=0,
+                )
+            except Exception as exc:
+                raise PluginServiceError("数据库查询失败。", type(exc).__name__) from None
 
 
 def build_validation_report(messages: list[EssenceMessage]) -> ValidationReport:
@@ -153,6 +221,54 @@ def format_status_report(
     return "\n".join(lines)
 
 
+def format_sync_report(report: SyncReport) -> str:
+    return "\n".join(
+        (
+            "精华同步完成",
+            "目标群：已授权",
+            f"采集数量：{report.collected}",
+            f"新增：{report.inserted}",
+            f"更新：{report.updated}",
+            f"未变化：{report.unchanged}",
+        )
+    )
+
+
+def format_search_page(
+    page: SearchPage,
+    *,
+    max_content_chars: int,
+    title: str = "精华查询结果",
+) -> str:
+    if not page.items:
+        return f"{title}\n未找到匹配记录。"
+
+    lines = [f"{title}：{len(page.items)}/{page.total}"]
+    for index, item in enumerate(page.items, start=1):
+        timestamp = _safe_reply_text(
+            item.get("essence_time") or item.get("sender_time") or "未知时间",
+            32,
+        )
+        sender = _safe_reply_text(item.get("sender") or "未知发送者", 80)
+        content = _safe_reply_text(
+            item.get("content_text") or "[空消息]",
+            _clamp_content_limit(max_content_chars),
+        )
+        content_type = _safe_reply_text(item.get("content_type") or "unknown", 32)
+        lines.extend(
+            (
+                f"[{index}/{len(page.items)}] {timestamp}",
+                f"发送者：{sender}",
+                f"内容：{content}",
+                f"类型：{content_type}",
+            )
+        )
+    remaining = max(0, page.total - len(page.items))
+    if remaining:
+        lines.append(f"另有 {remaining} 条结果未显示。")
+    return "\n".join(lines)
+
+
 def _type_summary(values: Any) -> str:
     names = sorted({type(value).__name__ for value in values})
     return "|".join(names) if names else "missing"
@@ -160,3 +276,41 @@ def _type_summary(values: Any) -> str:
 
 def _format_counts(values: Mapping[str, int]) -> str:
     return ", ".join(f"{name}={count}" for name, count in values.items()) or "无"
+
+
+def _require_group_id(group_id: str) -> str:
+    normalized = str(group_id or "").strip()
+    if not normalized:
+        raise PluginServiceError("目标群无效。", "missing_group_id")
+    return normalized
+
+
+def _safe_reply_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    text = re.sub(r"https?://\S+", "[链接已隐藏]", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?i)\b(?:token|cookie|authorization)\s*[:=]\s*\S+",
+        "[凭据已隐藏]",
+        text,
+    )
+    text = re.sub(r"(?i)(?<!\w)[a-z]:[\\/][^\s]+", "[路径已隐藏]", text)
+    text = re.sub(r"(?<!\w)/(?:[^/\s]+/)+[^\s]+", "[路径已隐藏]", text)
+    if len(text) > limit:
+        return text[: max(0, limit - 1)].rstrip() + "…"
+    return text
+
+
+def _clamp_limit(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 5
+    return max(1, min(parsed, 20))
+
+
+def _clamp_content_limit(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 300
+    return max(50, min(parsed, 2000))

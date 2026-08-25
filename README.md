@@ -1,11 +1,16 @@
 # Group Essence Extractor
 
-一个面向 QQ 群精华消息的本地采集与检索工具。程序优先通过 OneBot HTTP
-接口获取精华消息，在接口不可用或没有返回数据时可回退到截图 OCR，最终将统一
-后的记录写入 SQLite，并提供命令行和 HTTP API 两种检索方式。
+一个面向 QQ 群精华消息的采集与检索工具。当前推荐的远端部署形态是 AstrBot
+插件：复用 AstrBot 与 NapCat 已有的 OneBot 连接，在 QQ 中完成只读验收、同步与
+查询，不增加 HTTP 端口或 NapCat Token。独立 CLI/API/OCR 仍保留，用于本地采集、
+离线维护和截图识别。
 
 ## 功能
 
+- 可直接从仓库安装为 AstrBot 插件，提供 `/精华验收`、`/精华同步`、
+  `/精华查询`、`/精华最近` 和 `/精华状态`。
+- 插件默认只读，只允许配置中的管理员与群白名单，所有匹配指令均阻止进入 LLM。
+- 插件通过当前 AIOCQHTTP 事件调用 OneBot Action，不保存 NapCat 地址或 Token。
 - 支持 NapCat / go-cqhttp 兼容的 `get_essence_msg_list` 接口。
 - 精华列表缺少发送时间或正文时，通过 `get_msg` 补全单条消息。
 - OneBot 失败或没有数据时，可扫描截图目录并使用 Tesseract OCR。
@@ -22,11 +27,13 @@
 
 ## 运行要求
 
-- Python 3.10 或更高版本。
-- 使用 OneBot 时：可访问的 NapCat 或 go-cqhttp 兼容 HTTP 服务，以及目标群号。
+- AstrBot 插件：AstrBot 4.x、已经可用的 NapCat/AIOCQHTTP 连接和目标群。
+- 独立应用：Python 3.10 或更高版本。
+- 独立 OneBot HTTP 采集：可访问的 NapCat 或 go-cqhttp 服务及目标群号。
 - 使用 OCR 时：Tesseract OCR 和需要的语言包。中文默认使用 `chi_sim+eng`。
 
-OneBot 与 OCR 可以只配置其中一种。默认行为是优先 OneBot，失败后尝试 OCR。
+独立应用中的 OneBot 与 OCR 可以只配置其中一种，默认优先 OneBot、失败后尝试
+OCR。AstrBot 插件第一版不加载 OCR、图片下载或独立 HTTP 依赖。
 
 ## 安装
 
@@ -59,6 +66,45 @@ essence --help
 ```powershell
 python -m group_essence_extractor.cli --help
 ```
+
+## AstrBot 插件部署
+
+在 AstrBot WebUI 的插件管理页使用本仓库地址安装，或上传根目录同时包含
+`main.py`、`metadata.yaml`、`_conf_schema.json`、`requirements.txt` 和 `src/` 的
+插件压缩包。插件配置来自 AstrBot，不读取 `.env`。
+
+首次安装必须保持：
+
+```text
+validation_mode = true
+admin_ids = [管理员 QQ 号]
+allowed_group_ids = [一个测试群号]
+default_group_id = 测试群号（仅私聊需要）
+enable_image_enrichment = false
+enable_scheduled_sync = false
+```
+
+先由管理员执行：
+
+```text
+/精华状态
+/精华验收
+```
+
+验收回复只有字段类型和聚合计数，不创建数据库。确认真实 OneBot 契约正常后，将
+`validation_mode` 改为 `false`，再依次执行：
+
+```text
+/精华同步
+/精华同步
+/精华查询 脱敏关键词
+/精华最近 5
+```
+
+第二次同步应主要为“未变化”。插件数据库按需位于 AstrBot 数据根目录下的
+`plugin_data/astrbot_plugin_group_essence/group_essence.db`，不会读写本仓库默认的
+`data/group_essence.db`。完整安装、验收、故障定位与回滚步骤见
+[`docs/ASTRBOT_DEPLOYMENT.md`](docs/ASTRBOT_DEPLOYMENT.md)。
 
 ### 安装 Tesseract
 
@@ -325,6 +371,9 @@ Content-Type: application/json
 ## 项目与资源目录
 
 ```text
+main.py                       AstrBot 插件命令入口
+metadata.yaml                 AstrBot 插件元数据
+_conf_schema.json             AstrBot WebUI 配置结构
 src/group_essence_extractor/  Python 包与运行逻辑
 tests/                        自动测试；公开且脱敏的夹具放 tests/fixtures/
 docs/                         架构与开发补充文档；配图放 docs/assets/
@@ -335,7 +384,8 @@ example.env                   可提交的配置模板
 ```
 
 运行数据的详细规则见 `data/README.md`，内部模块和数据流见
-`docs/ARCHITECTURE.md`。远端 NapCat 验收步骤见 `docs/REMOTE_VALIDATION.md`。
+`docs/ARCHITECTURE.md`。AstrBot 远端部署见 `docs/ASTRBOT_DEPLOYMENT.md`；仅在维护
+独立 OneBot HTTP 客户端时才使用 `docs/REMOTE_VALIDATION.md`。
 
 ## 开发与测试
 
@@ -354,6 +404,8 @@ python -m pip check
 
 ## 已知限制
 
+- AstrBot 插件第一版只允许配置的管理员主动触发，不启用定时同步、图片补全或截图
+  OCR；这些能力仍由独立 CLI 提供。
 - 截图 OCR 尚未进行界面区域分割；未覆盖的卡片布局、严重裁切或低清图片仍可能需要
   新增解析策略。
 - 已失效或需要额外登录态的 OneBot 图片地址会记录为失败，需在可访问图片的环境重试。

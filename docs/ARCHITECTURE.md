@@ -3,8 +3,8 @@
 ## 目标
 
 Group Essence Extractor 将不同来源的 QQ 群精华消息转换为统一记录，持久化到
-SQLite，并通过 CLI 和 HTTP API 提供相同的搜索能力。项目以单机、小规模采集为
-主要场景，优先保持部署简单和数据可追溯。
+SQLite，并通过 AstrBot 插件、CLI 和 HTTP API 复用相同的标准化与搜索能力。远端
+首选 AstrBot 薄适配层；独立应用继续服务于离线维护和无需 AstrBot 的场景。
 
 ## 模块边界
 
@@ -12,7 +12,12 @@ SQLite，并通过 CLI 和 HTTP API 提供相同的搜索能力。项目以单�
 | --- | --- |
 | `config.py` | 从 `.env` 和环境变量构造不可变设置 |
 | `diagnostics.py` | 以只读方式检查本机配置和运行条件 |
-| `fetchers.py` | 调用 OneBot、补全消息详情并标准化响应 |
+| `normalization.py` | 与传输无关地判断详情需求、解析消息段并生成 `EssenceMessage` |
+| `quality.py` | 汇总标准化记录的字段缺失、内容类型与 OCR 质量 |
+| `fetchers.py` | 独立应用的同步 HTTP OneBot 请求与详情取得 |
+| `astrbot_source.py` | 通过当前 AstrBot 事件异步调用 OneBot Action |
+| `plugin_config.py` | 解析插件配置并执行管理员、群白名单授权 |
+| `plugin_service.py` | 编排只读验收、同步、查询、状态和并发控制 |
 | `ocr.py` | 调用 Tesseract，自适应选择原图或低置信度灰度兜底结果 |
 | `parsers.py` | 从标签模板或 QQ 卡片布局提取字段并生成截图指纹 |
 | `models.py` | 定义来源无关的 `EssenceMessage` |
@@ -22,26 +27,60 @@ SQLite，并通过 CLI 和 HTTP API 提供相同的搜索能力。项目以单�
 | `exporters.py` | 将分页搜索结果写为稳定结构的 JSON 或 CSV |
 | `cli.py` | 命令行参数与输出适配 |
 | `api.py` | FastAPI 应用工厂、生命周期和 HTTP 适配 |
+| 根目录 `main.py` | AstrBot 指令、事件拦截、脱敏回复与日志适配 |
 
-CLI 和 API 只负责输入输出，采集规则集中在 `ingest.py`，存储规则集中在
-`db.py`。
+CLI、API 和 AstrBot 入口只负责平台输入输出。HTTP 和 AstrBot 分别取得原始数据后
+都调用 `normalization.py`；存储规则集中在 `db.py`。
 
 ## 采集流程
 
 ### OneBot
 
-1. `ingest_all` 在 `PREFER_ONEBOT=true` 时创建 `OneBotClient`。
-2. 客户端调用 `get_essence_msg_list`，`GROUP_ID` 是必填参数。
-3. 若精华项缺少 `sender_time` 或正文，客户端按 `message_id` 调用 `get_msg`。
+1. 独立应用的 `ingest_all` 在 `PREFER_ONEBOT=true` 时创建 `OneBotClient`。
+2. HTTP 客户端调用 `get_essence_msg_list`，`GROUP_ID` 是必填参数。
+3. 若精华项缺少 `sender_time` 或正文，HTTP 客户端按 `message_id` 调用 `get_msg`。
 4. 时间戳统一为本地时间 `YYYY-MM-DD HH:MM:SS`；秒、毫秒、微秒和纳秒输入均可
    归一化。
 5. 纯文本、纯图片和混合图文分别标记为 `text`、`image` 和 `mixed`。多个图片
    地址以换行分隔保存在 `image_path`。
-6. 单条详情补全失败只记录在 `raw_data` 中，不丢弃已经取得的精华项；精华列表
+6. `fetchers.py` 和 `astrbot_source.py` 将结果交给同一组纯标准化函数，保证两种
+   transport 的字段语义一致。
+7. 单条详情补全失败只记录在 `raw_data` 中，不丢弃已经取得的精华项；精华列表
    请求失败则交由上层决定是否 OCR 回退。
 
 采集完成后统一生成字段质量摘要。`ingest --dry-run` 到此结束，不创建仓库实例；
 正式采集才进入数据库更新步骤。
+
+### AstrBot Action 适配
+
+远端数据流为：
+
+```text
+QQ 指令
+  -> AstrBot AIOCQHTTP 事件
+  -> event.bot 的 call_action
+  -> get_essence_msg_list / 必要时 get_msg
+  -> normalization.py
+  -> plugin_service.py
+  -> AstrBot 数据卷中的 SQLite
+```
+
+插件不连接 NapCat HTTP 地址，也不保存 Token。`astrbot_source.py` 同时兼容 Action
+直接返回 data 与完整 OneBot envelope；status/retcode 异常只形成不含 payload 的
+公开错误。单条详情失败保留精华项，并只记录脱敏后的错误摘要。
+
+所有指令进入处理器后立即 `stop_event()`，因此不会继续进入 LLM。插件自身再次执行
+管理员 ID 和群白名单精确匹配；群聊查询固定使用当前群，私聊使用同时在白名单内的
+默认群，只有管理员同步/验收指令可以显式指定白名单群。
+
+`validation_mode=true` 时只有验收和状态可实际执行，初始化插件、验收和状态都不会
+创建数据库。关闭该模式后，同步才惰性初始化数据库，查询仍拒绝空关键词且每次限制
+在 1–20 条。同步、查询和审计等同步 SQLite 工作全部通过 `asyncio.to_thread` 执行，
+服务实例用一个 `asyncio.Lock` 串行化 Action 与数据库操作，避免多个管理员命令重入。
+
+插件数据目录固定为 AstrBot 数据根目录下的
+`plugin_data/astrbot_plugin_group_essence/`。源码目录、本仓库 `data/` 和当前工作目录
+都不是插件持久化位置。
 
 ### OCR 回退
 
@@ -120,10 +159,17 @@ CSV 使用稳定列顺序。
 启动阶段初始化数据库，因此单纯导入 `group_essence_extractor.api` 不会写数据库。
 运行中的设置和仓库存放在 `app.state`，路由不依赖模块级可变全局对象。
 
+独立 FastAPI 应用不属于 AstrBot 插件运行路径。当前远端部署不启动它，也不为插件
+增加端口；只有出现 AstrBot 以外的调用方时才评估独立部署及其鉴权边界。
+
 ## 文件边界
 
 - `src/`、`tests/`、`docs/`、`.github/` 和配置模板属于源码仓库。
+- 根目录 `main.py`、`metadata.yaml`、`_conf_schema.json` 和 `requirements.txt` 属于
+  AstrBot 可安装插件边界；插件依赖表不得引入独立 API/OCR 依赖。
 - `data/` 中的数据库、截图和哈希图片缓存属于本地运行数据。
+- 远端插件运行数据只进入 AstrBot 数据卷的专用 `plugin_data` 子目录，不回写 Git
+  仓库或插件源码目录。
 - 自动测试使用系统临时目录，不读写默认数据库，也不依赖真实 OneBot 或
   Tesseract 服务。
 - OCR 引擎测试使用临时生成图片和模拟的 Tesseract TSV 数据；解析测试只使用脱敏
@@ -137,4 +183,5 @@ CSV 使用稳定列顺序。
 - 为需要 Cookie 或短期签名的图片源增加可插拔认证适配。
 - 使用 UI 区域分割提升截图字段识别准确率。
 - 数据量增长后引入 SQLite FTS5，并通过现有 schema 迁移机制升级索引。
-- 在需要远程部署时增加鉴权、速率限制和结构化日志。
+- 若未来部署独立 HTTP 服务，为该服务增加鉴权、速率限制和结构化日志；AstrBot
+  插件继续复用平台权限与现有 OneBot 连接。

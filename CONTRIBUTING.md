@@ -34,6 +34,10 @@ docs: 更新 OCR 安装说明
 - 保持 Python 3.10 兼容，不依赖仅在更新版本中出现的语法。
 - 新逻辑优先使用小函数和明确的数据边界，避免在 CLI 或 API 层复制业务逻辑。
 - OneBot 字段先标准化为字符串 ID，再写入 `EssenceMessage`。
+- 传输无关的 OneBot 字段处理放在 `normalization.py`；HTTP 客户端和 AstrBot Action
+  适配器不得各自维护一套解析规则。
+- AstrBot `main.py` 只做命令、授权、日志和回复编排，不直接运行同步 SQLite API。
+- 每个匹配的插件指令必须在处理器入口立即调用 `event.stop_event()`。
 - 外部响应和 OCR 可能不完整；正常缺失应有可理解的回退行为。
 - 未经讨论不要引入体积较大的运行时依赖。
 
@@ -57,6 +61,11 @@ essence --help
 HTTP 契约测试可以在 `127.0.0.1` 随机端口启动临时服务，但必须在测试结束时关闭，
 且响应数据只能来自 `tests/fixtures/` 下的脱敏固定夹具。
 
+AstrBot Action 与插件入口测试使用 fake event、fake async `call_action` 和注入的最小
+AstrBot 模块，不安装或连接真实 AstrBot/NapCat。测试必须覆盖管理员与群白名单、
+只读模式、所有指令的事件拦截、同步幂等、查询群隔离、回复脱敏、SQLite 线程卸载和
+并发同步串行化。插件测试数据只写系统临时目录。
+
 图片补全测试同样只能使用回环地址和系统临时目录，并通过 mock 返回 OCR 文本，不得
 调用真实 Tesseract、QQ 图片 CDN 或现有 `data/images/`。测试结束后必须关闭 HTTP
 服务并删除哈希缓存。
@@ -76,6 +85,10 @@ HTTP 契约测试可以在 `127.0.0.1` 随机端口启动临时服务，但必�
 - 文档配图放在 `docs/assets/`。
 - 配置模板写入 `example.env`，本机值写入 `.env`。
 - CI、Issue 和 Pull Request 配置放在 `.github/`，必须纳入版本控制。
+- AstrBot 插件入口与元数据放在仓库根目录；插件持久化数据必须使用 AstrBot 数据根
+  目录下的 `plugin_data/astrbot_plugin_group_essence/`，不得写入源码目录。
+- `requirements.txt` 只列 AstrBot 插件额外依赖；独立 CLI/API/OCR 依赖由
+  `pyproject.toml` 管理。
 
 涉及模块边界、数据身份或存储流程的改动，应同步更新
 `docs/ARCHITECTURE.md`；面向使用者的行为变化应同步更新 `README.md`。

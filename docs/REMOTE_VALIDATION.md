@@ -1,7 +1,12 @@
-# 远端 NapCat 验收指南
+# 独立 OneBot HTTP 客户端验收指南
 
-本流程用于代码在本地完成测试后，在能够登录 QQ 的远端环境验证真实 OneBot 响应。
-目标是先检查、再预览、最后写入，避免在远端临时修改代码或盲目污染数据库。
+本文只适用于维护独立 CLI 的 OneBot HTTP 直连能力。当前生产式远端验证应优先作为
+AstrBot 插件部署，复用 AstrBot 已有的 NapCat 连接；请改用
+[`ASTRBOT_DEPLOYMENT.md`](./ASTRBOT_DEPLOYMENT.md)。不要为了插件验收额外开放
+NapCat HTTP 端口或配置第二份 Token。
+
+以下流程用于确实需要独立客户端时，在能够登录 QQ 的受控环境验证真实 OneBot
+响应。目标是先检查、再预览、最后写入，避免在远端临时修改代码或污染数据库。
 
 ## 1. 安装与配置
 

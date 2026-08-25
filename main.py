@@ -16,7 +16,9 @@ from .src.group_essence_extractor.plugin_config import PluginSettings
 from .src.group_essence_extractor.plugin_service import (
     GroupEssencePluginService,
     PluginServiceError,
+    format_search_page,
     format_status_report,
+    format_sync_report,
     format_validation_report,
 )
 
@@ -95,6 +97,134 @@ class GroupEssencePlugin(Star):
                 report,
                 validation_mode=self.settings.validation_mode,
                 allowed_group_count=len(self.settings.allowed_group_ids),
+            )
+        )
+
+    @filter.command("精华同步")
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    async def sync_essence(
+        self,
+        event: AstrMessageEvent,
+        group_id: str = "",
+    ):
+        """同步已授权群的精华消息；只读验收模式下拒绝执行。"""
+        event.stop_event()
+        target = self.settings.resolve_authorized_group(event, group_id)
+        if target is None:
+            yield event.plain_result("无权限或目标群未在允许列表中。")
+            return
+        if self.settings.validation_mode:
+            yield event.plain_result("当前处于只读验收模式，未执行同步。")
+            return
+
+        try:
+            report = await self.service.sync(event, target)
+        except OneBotActionError as exc:
+            logger.warning(f"GroupEssence 同步失败：{exc.public_message}")
+            yield event.plain_result(f"精华同步失败：{exc.public_message}")
+            return
+        except PluginServiceError as exc:
+            logger.warning(f"GroupEssence 同步失败：category={exc.category}")
+            yield event.plain_result(f"精华同步失败：{exc.public_message}")
+            return
+        except Exception as exc:
+            logger.error(f"GroupEssence 同步失败：category={type(exc).__name__}")
+            yield event.plain_result("精华同步失败：内部错误。")
+            return
+
+        logger.info(
+            "GroupEssence 同步完成："
+            f"collected={report.collected}, inserted={report.inserted}, "
+            f"updated={report.updated}, unchanged={report.unchanged}"
+        )
+        yield event.plain_result(format_sync_report(report))
+
+    @filter.command("精华查询")
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    async def search_essence(
+        self,
+        event: AstrMessageEvent,
+        keyword: str = "",
+    ):
+        """在当前已授权群的本地精华记录中查询正文。"""
+        event.stop_event()
+        target = self.settings.resolve_authorized_group(event)
+        if target is None:
+            yield event.plain_result("无权限或目标群未在允许列表中。")
+            return
+        if self.settings.validation_mode:
+            yield event.plain_result("当前处于只读验收模式，未执行查询。")
+            return
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            yield event.plain_result("查询关键词不能为空。")
+            return
+
+        try:
+            page = await self.service.search(
+                target,
+                keyword,
+                self.settings.max_query_results,
+            )
+        except PluginServiceError as exc:
+            logger.warning(f"GroupEssence 查询失败：category={exc.category}")
+            yield event.plain_result(f"精华查询失败：{exc.public_message}")
+            return
+        except Exception as exc:
+            logger.error(f"GroupEssence 查询失败：category={type(exc).__name__}")
+            yield event.plain_result("精华查询失败：内部错误。")
+            return
+
+        logger.info(f"GroupEssence 查询完成：count={len(page.items)}, total={page.total}")
+        yield event.plain_result(
+            format_search_page(
+                page,
+                max_content_chars=self.settings.max_content_chars,
+            )
+        )
+
+    @filter.command("精华最近")
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    async def recent_essence(
+        self,
+        event: AstrMessageEvent,
+        count: str = "",
+    ):
+        """显示当前已授权群最近设置的精华消息。"""
+        event.stop_event()
+        target = self.settings.resolve_authorized_group(event)
+        if target is None:
+            yield event.plain_result("无权限或目标群未在允许列表中。")
+            return
+        if self.settings.validation_mode:
+            yield event.plain_result("当前处于只读验收模式，未执行查询。")
+            return
+        try:
+            limit = int(count) if str(count or "").strip() else self.settings.max_query_results
+        except ValueError:
+            yield event.plain_result("数量必须是 1 到 20 之间的整数。")
+            return
+        if not 1 <= limit <= 20:
+            yield event.plain_result("数量必须是 1 到 20 之间的整数。")
+            return
+
+        try:
+            page = await self.service.recent(target, limit)
+        except PluginServiceError as exc:
+            logger.warning(f"GroupEssence 最近记录读取失败：category={exc.category}")
+            yield event.plain_result(f"精华最近读取失败：{exc.public_message}")
+            return
+        except Exception as exc:
+            logger.error(f"GroupEssence 最近记录读取失败：category={type(exc).__name__}")
+            yield event.plain_result("精华最近读取失败：内部错误。")
+            return
+
+        logger.info(f"GroupEssence 最近记录读取完成：count={len(page.items)}")
+        yield event.plain_result(
+            format_search_page(
+                page,
+                max_content_chars=self.settings.max_content_chars,
+                title="最近精华",
             )
         )
 

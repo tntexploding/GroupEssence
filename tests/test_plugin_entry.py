@@ -63,7 +63,11 @@ class FakeEvent:
 
 
 class FakeService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
     async def validate(self, _: object, __: str) -> SimpleNamespace:
+        self.calls.append(("validate", __))
         return SimpleNamespace(
             collected=1,
             by_content_type={"text": 1},
@@ -84,7 +88,20 @@ class FakeService:
         )
 
     async def status(self) -> SimpleNamespace:
+        self.calls.append(("status",))
         return SimpleNamespace(database_exists=False, total=0, schema_version=None)
+
+    async def sync(self, _: object, group_id: str) -> SimpleNamespace:
+        self.calls.append(("sync", group_id))
+        return SimpleNamespace(collected=1, inserted=1, updated=0, unchanged=0)
+
+    async def search(self, group_id: str, keyword: str, limit: int) -> SimpleNamespace:
+        self.calls.append(("search", group_id, keyword, limit))
+        return SimpleNamespace(items=[], total=0, limit=limit, offset=0)
+
+    async def recent(self, group_id: str, limit: int) -> SimpleNamespace:
+        self.calls.append(("recent", group_id, limit))
+        return SimpleNamespace(items=[], total=0, limit=limit, offset=0)
 
 
 @contextmanager
@@ -208,6 +225,177 @@ class PluginEntryTests(unittest.TestCase):
                 self.assertEqual(status_denied.stop_calls, 1)
                 self.assertEqual(validate_results, ["无权限或目标群未在允许列表中。"])
                 self.assertEqual(status_results, ["无权限。"])
+
+    def test_validation_mode_blocks_sync_and_queries_before_service_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            data_root = Path(temp)
+            with load_plugin_main(data_root) as plugin_main:
+                plugin = plugin_main.GroupEssencePlugin(
+                    object(),
+                    {
+                        "admin_ids": ["admin"],
+                        "allowed_group_ids": ["123456"],
+                        "validation_mode": True,
+                    },
+                )
+                service = FakeService()
+                plugin.service = service
+                sync_event = FakeEvent()
+                search_event = FakeEvent()
+                recent_event = FakeEvent()
+
+                sync_results = asyncio.run(
+                    collect_results(plugin.sync_essence(sync_event))
+                )
+                search_results = asyncio.run(
+                    collect_results(plugin.search_essence(search_event, "关键词"))
+                )
+                recent_results = asyncio.run(
+                    collect_results(plugin.recent_essence(recent_event, "3"))
+                )
+
+                self.assertEqual(sync_event.stop_calls, 1)
+                self.assertEqual(search_event.stop_calls, 1)
+                self.assertEqual(recent_event.stop_calls, 1)
+                self.assertTrue(all("只读验收模式" in item[0] for item in (
+                    sync_results,
+                    search_results,
+                    recent_results,
+                )))
+                self.assertEqual(service.calls, [])
+                self.assertFalse((data_root / "plugin_data").exists())
+
+    def test_enabled_commands_stop_events_and_use_current_authorized_group(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with load_plugin_main(Path(temp)) as plugin_main:
+                plugin = plugin_main.GroupEssencePlugin(
+                    object(),
+                    {
+                        "admin_ids": ["admin"],
+                        "allowed_group_ids": ["123456", "654321"],
+                        "validation_mode": False,
+                        "max_query_results": 4,
+                    },
+                )
+                service = FakeService()
+                plugin.service = service
+                sync_event = FakeEvent()
+                search_event = FakeEvent()
+                recent_event = FakeEvent()
+
+                sync_results = asyncio.run(
+                    collect_results(plugin.sync_essence(sync_event, "654321"))
+                )
+                search_results = asyncio.run(
+                    collect_results(plugin.search_essence(search_event, "活动"))
+                )
+                recent_results = asyncio.run(
+                    collect_results(plugin.recent_essence(recent_event, "2"))
+                )
+
+                self.assertEqual(sync_event.stop_calls, 1)
+                self.assertEqual(search_event.stop_calls, 1)
+                self.assertEqual(recent_event.stop_calls, 1)
+                self.assertIn("精华同步完成", sync_results[0])
+                self.assertIn("未找到匹配记录", search_results[0])
+                self.assertIn("未找到匹配记录", recent_results[0])
+                self.assertEqual(
+                    service.calls,
+                    [
+                        ("sync", "654321"),
+                        ("search", "123456", "活动", 4),
+                        ("recent", "123456", 2),
+                    ],
+                )
+
+    def test_invalid_query_arguments_stop_event_without_service_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with load_plugin_main(Path(temp)) as plugin_main:
+                plugin = plugin_main.GroupEssencePlugin(
+                    object(),
+                    {
+                        "admin_ids": ["admin"],
+                        "allowed_group_ids": ["123456"],
+                        "validation_mode": False,
+                    },
+                )
+                service = FakeService()
+                plugin.service = service
+                search_event = FakeEvent()
+                recent_event = FakeEvent()
+
+                search_results = asyncio.run(
+                    collect_results(plugin.search_essence(search_event, "   "))
+                )
+                recent_results = asyncio.run(
+                    collect_results(plugin.recent_essence(recent_event, "21"))
+                )
+
+                self.assertEqual(search_event.stop_calls, 1)
+                self.assertEqual(recent_event.stop_calls, 1)
+                self.assertEqual(search_results, ["查询关键词不能为空。"])
+                self.assertEqual(recent_results, ["数量必须是 1 到 20 之间的整数。"])
+                self.assertEqual(service.calls, [])
+
+    def test_all_commands_stop_event_when_dependencies_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with load_plugin_main(Path(temp)) as plugin_main:
+                class FailingService:
+                    async def validate(self, _: object, __: str) -> object:
+                        raise plugin_main.OneBotActionError(
+                            "get_essence_msg_list",
+                            status="failed",
+                            retcode=100,
+                        )
+
+                    async def status(self) -> object:
+                        raise plugin_main.PluginServiceError(
+                            "数据库状态读取失败。",
+                            "sqlite_error",
+                        )
+
+                    async def sync(self, _: object, __: str) -> object:
+                        raise plugin_main.PluginServiceError(
+                            "数据库同步失败。",
+                            "sqlite_error",
+                        )
+
+                    async def search(self, _: str, __: str, ___: int) -> object:
+                        raise plugin_main.PluginServiceError(
+                            "数据库查询失败。",
+                            "sqlite_error",
+                        )
+
+                    async def recent(self, _: str, __: int) -> object:
+                        raise plugin_main.PluginServiceError(
+                            "数据库查询失败。",
+                            "sqlite_error",
+                        )
+
+                plugin = plugin_main.GroupEssencePlugin(
+                    object(),
+                    {
+                        "admin_ids": ["admin"],
+                        "allowed_group_ids": ["123456"],
+                        "validation_mode": False,
+                    },
+                )
+                plugin.service = FailingService()
+                events = [FakeEvent() for _ in range(5)]
+
+                results = [
+                    asyncio.run(collect_results(plugin.validate_essence(events[0]))),
+                    asyncio.run(collect_results(plugin.essence_status(events[1]))),
+                    asyncio.run(collect_results(plugin.sync_essence(events[2]))),
+                    asyncio.run(
+                        collect_results(plugin.search_essence(events[3], "关键词"))
+                    ),
+                    asyncio.run(collect_results(plugin.recent_essence(events[4], "5"))),
+                ]
+
+                self.assertTrue(all(event.stop_calls == 1 for event in events))
+                self.assertTrue(all(len(result) == 1 for result in results))
+                self.assertTrue(all("失败" in result[0] for result in results))
 
 
 if __name__ == "__main__":
