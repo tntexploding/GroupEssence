@@ -20,7 +20,7 @@ SQLite，并通过 AstrBot 插件、CLI 和 HTTP API 复用相同的标准化与
 | `plugin_service.py` | 编排只读验收、同步、查询、状态和并发控制 |
 | `ocr.py` | 调用 Tesseract，自适应选择原图或低置信度灰度兜底结果 |
 | `parsers.py` | 从标签模板或 QQ 卡片布局提取字段并生成截图指纹 |
-| `models.py` | 定义来源无关的 `EssenceMessage` |
+| `models.py` | 定义来源无关的 `EssenceMessage` 与最小时间匹配记录 |
 | `ingest.py` | 选择来源、执行回退并汇总写入统计 |
 | `image_enrichment.py` | 发现 OneBot 图片、哈希缓存、OCR 与重试 |
 | `db.py` | 迁移 SQLite、更新或插入记录、审计、修复和分页搜索 |
@@ -61,6 +61,7 @@ QQ 指令
   -> AstrBot AIOCQHTTP 事件
   -> event.bot 的 call_action
   -> get_essence_msg_list / 正文缺失时 get_msg
+  -> 新记录缺时间时一次有界 get_group_msg_history
   -> normalization.py
   -> plugin_service.py
   -> AstrBot 数据卷中的 SQLite
@@ -68,8 +69,13 @@ QQ 指令
 
 插件不连接 NapCat HTTP 地址，也不保存 Token。`astrbot_source.py` 同时兼容 Action
 直接返回 data 与完整 OneBot envelope；status/retcode 异常只形成不含 payload 的
-公开错误。单条详情失败保留精华项，并只记录脱敏后的错误摘要。仅缺发送时间的历史
-精华保持空值，不调用 `get_msg`，也不使用精华设置时间伪造发送时间。
+公开错误。单条详情失败保留精华项，并只记录脱敏后的错误摘要；同步请求另有上限，
+数据库中已有的失败 ID 不会在每轮重复请求。仅缺发送时间不会触发 `get_msg`，也不
+使用精华设置时间伪造发送时间。新记录可用一次有界群历史查询补全，旧记录由管理员
+显式运行补全命令；历史结果只转换成消息身份和时间，不保留正文或发送者。
+
+插件不注册全量群消息监听器。所有采集与补全都来自明确的管理员命令，避免改变普通
+消息的 AstrBot 唤醒与 LLM 流程。
 
 所有指令进入处理器后立即 `stop_event()`，因此不会继续进入 LLM。插件自身再次执行
 管理员 ID 和群白名单精确匹配；群聊查询固定使用当前群，私聊使用同时在白名单内的
@@ -77,8 +83,10 @@ QQ 指令
 
 `validation_mode=true` 时只有验收和状态可实际执行，初始化插件、验收和状态都不会
 创建数据库。关闭该模式后，同步才惰性初始化数据库，查询仍拒绝空关键词且每次限制
-在 1–20 条。验收阶段只处理最多 `max_validation_detail_requests` 个正文缺失项，报告
-候选、实际请求、跳过和失败数，避免历史消息批量失败刷屏。同步、查询和审计等同步
+在 1–20 条。验收阶段只处理最多 `max_validation_detail_requests` 个正文缺失项；正式
+同步使用独立的 `max_sync_detail_requests` 上限，群历史读取使用
+`history_query_limit`。报告区分候选、实际请求、跳过和失败数，避免历史消息批量失败
+刷屏。同步、查询和审计等同步
 SQLite 工作全部通过 `asyncio.to_thread` 执行，
 服务实例用一个 `asyncio.Lock` 串行化 Action 与数据库操作，避免多个管理员命令重入。
 
@@ -132,10 +140,13 @@ OneBot 记录优先通过 `(source, group_id, message_id)` 查找已有行，并
 写入结果分为：
 
 - `inserted`：新增记录；
-- `updated`：稳定身份相同但字段或原始响应发生变化；
+- `updated`：稳定身份相同且业务字段发生变化；
+- `refreshed`：只有原始响应或 OneBot 短期图片地址变化；
 - `unchanged`：记录内容完全一致，或旧复合唯一约束判定为重复。
 
-`raw_json` 保存采集源的原始结构和补全响应，业务搜索只读取标准化列。数据库以
+写入合并不会用上游空值抹掉已经修复的发送时间、OCR 或有效正文。时间补全只更新
+空值，并在 `raw_json` 写入最小来源标记；群历史响应本身不会保存。`raw_json` 仍保存
+精华采集源的原始结构和正文详情补全响应，业务搜索只读取标准化列。数据库以
 SQLite `PRAGMA user_version` 标记结构版本；迁移按版本顺序在事务中执行，重复初始化
 不会重放迁移，版本高于程序支持范围时拒绝打开，避免旧程序误写新结构。
 
@@ -187,7 +198,7 @@ CSV 使用稳定列顺序。
 - 为需要 Cookie 或短期签名的图片源增加可插拔认证适配。
 - 使用 UI 区域分割提升截图字段识别准确率。
 - 数据量增长后引入 SQLite FTS5，并通过现有 schema 迁移机制升级索引。
-- 如业务必须补回历史发送时间，实现群历史分页拉取，并按群号与消息 ID 匹配；不从
-  精华时间或其他字段推断。
+- 如业务必须覆盖单次 `history_query_limit` 之外的历史发送时间，再增加带游标、硬上限
+  与速率限制的显式分页；仍只按群号与稳定消息身份匹配，不从精华时间推断。
 - 若未来部署独立 HTTP 服务，为该服务增加鉴权、速率限制和结构化日志；AstrBot
   插件继续复用平台权限与现有 OneBot 连接。

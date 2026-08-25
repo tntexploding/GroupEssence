@@ -7,8 +7,10 @@ import unittest
 from group_essence_extractor.astrbot_source import (
     AstrBotEssenceSource,
     OneBotActionError,
+    apply_history_sender_times,
     unwrap_action_result,
 )
+from group_essence_extractor.models import EssenceMessage, MessageTimeRecord
 
 
 class FakeActionApi:
@@ -191,6 +193,141 @@ class AstrBotSourceTests(unittest.TestCase):
         self.assertNotIn("super-secret", error)
         self.assertNotIn("private.invalid", error)
         self.assertNotIn("123456789", error)
+
+    def test_previous_detail_failure_can_be_skipped(self) -> None:
+        api = FakeActionApi(
+            {"get_essence_msg_list": [[{"message_id": "m-1", "operator_time": 1}]]}
+        )
+
+        message = asyncio.run(
+            AstrBotEssenceSource().get_essence_messages(
+                make_event(api),
+                "123456",
+                detail_request_limit=10,
+                skip_detail_ids={"m-1"},
+            )
+        )[0]
+
+        self.assertEqual(message.content_text, "[空消息]")
+        self.assertEqual(api.calls, [("get_essence_msg_list", {"group_id": 123456})])
+
+    def test_group_history_extracts_only_time_identity_and_enriches_by_sequence(self) -> None:
+        api = FakeActionApi(
+            {
+                "get_group_msg_history": [
+                    {
+                        "status": "ok",
+                        "retcode": 0,
+                        "data": {
+                            "messages": [
+                                {
+                                    "message_id": "history-id",
+                                    "message_seq": "200",
+                                    "msg_random": "300",
+                                    "time": 1_700_000_000,
+                                    "raw_message": "不得进入时间索引的正文",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+        records = asyncio.run(
+            AstrBotEssenceSource().get_group_history_times(
+                make_event(api),
+                "123456",
+                limit=100,
+            )
+        )
+        message = EssenceMessage(
+            sender="发送者",
+            sender_time="",
+            essence_time="2026-05-01 10:05:00",
+            operator="管理员",
+            content_text="正文",
+            group_id="123456",
+            message_id="synthetic-id",
+            source="onebot",
+            raw_data={"essence": {"msg_seq": "200", "msg_random": "300"}},
+        )
+
+        enriched, changed = apply_history_sender_times(
+            [message],
+            records,
+            candidate_message_ids={"synthetic-id"},
+        )
+
+        self.assertEqual(changed, 1)
+        self.assertTrue(enriched[0].sender_time)
+        self.assertEqual((enriched[0].raw_data or {})["sender_time_source"], "group_history")
+        self.assertNotIn("raw_message", vars(records[0]))
+        self.assertEqual(
+            api.calls,
+            [("get_group_msg_history", {"group_id": 123456, "count": 100})],
+        )
+
+    def test_group_history_is_locally_bounded_when_adapter_returns_too_much(self) -> None:
+        api = FakeActionApi(
+            {
+                "get_group_msg_history": [
+                    {
+                        "messages": [
+                            {"message_id": f"history-{index}", "time": 1_700_000_000}
+                            for index in range(3)
+                        ]
+                    }
+                ]
+            }
+        )
+
+        records = asyncio.run(
+            AstrBotEssenceSource().get_group_history_times(
+                make_event(api),
+                "123456",
+                limit=2,
+            )
+        )
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            api.calls,
+            [("get_group_msg_history", {"group_id": 123456, "count": 2})],
+        )
+
+    def test_ambiguous_history_sequence_does_not_fill_wrong_time(self) -> None:
+        message = EssenceMessage(
+            sender="发送者",
+            sender_time="",
+            essence_time="2026-05-01 10:05:00",
+            operator="管理员",
+            content_text="正文",
+            group_id="123456",
+            message_id="synthetic-id",
+            source="onebot",
+            raw_data={"essence": {"msg_seq": "200"}},
+        )
+        history = [
+            MessageTimeRecord(
+                sender_time="",
+                message_id="synthetic-id",
+            ),
+            MessageTimeRecord(
+                sender_time="2026-05-01 10:00:00",
+                message_id="history-1",
+                message_seq="200",
+            ),
+            MessageTimeRecord(
+                sender_time="2026-05-01 10:01:00",
+                message_id="history-2",
+                message_seq="200",
+            ),
+        ]
+
+        enriched, changed = apply_history_sender_times([message], history)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(enriched[0].sender_time, "")
 
     def test_invalid_list_and_failed_envelope_raise_public_error(self) -> None:
         invalid_api = FakeActionApi({"get_essence_msg_list": [{"unexpected": "dict"}]})

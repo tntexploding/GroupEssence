@@ -99,6 +99,14 @@ def get_message_id(item: Mapping[str, Any]) -> str:
     return pick_id(item, "message_id")
 
 
+def get_message_sequence(item: Mapping[str, Any]) -> str:
+    return pick_id(item, "msg_seq", "message_seq", "real_seq", "seq")
+
+
+def get_message_random(item: Mapping[str, Any]) -> str:
+    return pick_id(item, "msg_random", "message_random", "random")
+
+
 def normalize_essence_item(
     item: Mapping[str, Any],
     *,
@@ -132,6 +140,10 @@ def normalize_essence_item(
     operator_id = pick_id(item, "operator_id", "operator_uin")
 
     raw_data: dict[str, Any] = {"essence": dict(item)}
+    if first_value(item.get("sender_time")) is not None:
+        raw_data["sender_time_source"] = "essence_list"
+    elif first_value(detail_data.get("time")) is not None:
+        raw_data["sender_time_source"] = "message_detail"
     if detail_data:
         raw_data["message_detail"] = dict(detail_data)
     if detail_error:

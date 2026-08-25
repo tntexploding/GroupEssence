@@ -4,6 +4,16 @@ from dataclasses import dataclass
 from typing import Any
 
 
+@dataclass(frozen=True)
+class MessageTimeRecord:
+    """脱敏的消息时间索引；不携带消息正文或发送者信息。"""
+
+    sender_time: str
+    message_id: str = ""
+    message_seq: str = ""
+    message_random: str = ""
+
+
 @dataclass
 class EssenceMessage:
     sender: str

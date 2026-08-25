@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "group-essence-extractor"
-version = "0.2.1"
+version = "0.3.0"
 description = "QQ群精华消息提取与检索工具"
 readme = "README.md"
 license = { file = "LICENSE" }

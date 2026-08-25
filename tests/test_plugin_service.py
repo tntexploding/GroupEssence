@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from group_essence_extractor.db import EssenceRepository, SearchPage
-from group_essence_extractor.models import EssenceMessage
+from group_essence_extractor.astrbot_source import OneBotActionError
+from group_essence_extractor.models import EssenceMessage, MessageTimeRecord
 from group_essence_extractor.plugin_service import (
     GroupEssencePluginService,
     PluginServiceError,
@@ -20,11 +22,12 @@ def make_message(
     group_id: str = "123456",
     message_id: str = "message-1",
     content: str = "活动通知",
+    sender_time: str = "2026-08-24 20:00:00",
 ) -> EssenceMessage:
     return EssenceMessage(
         sender="发送者",
         sender_id="10001",
-        sender_time="2026-08-24 20:00:00",
+        sender_time=sender_time,
         essence_time="2026-08-24 20:05:00",
         operator="管理员",
         operator_id="10002",
@@ -38,11 +41,22 @@ def make_message(
 
 
 class FakeSource:
-    def __init__(self, messages: list[EssenceMessage], *, pause: bool = False) -> None:
+    def __init__(
+        self,
+        messages: list[EssenceMessage],
+        *,
+        pause: bool = False,
+        history: list[MessageTimeRecord] | None = None,
+        history_error: bool = False,
+    ) -> None:
         self.messages = messages
         self.pause = pause
+        self.history = history or []
+        self.history_error = history_error
         self.active = 0
         self.max_active = 0
+        self.history_calls = 0
+        self.skip_detail_ids: set[str] = set()
 
     async def get_essence_messages(
         self,
@@ -50,13 +64,31 @@ class FakeSource:
         __: str,
         *,
         detail_request_limit: int | None = None,
+        skip_detail_ids: Iterable[str] = (),
     ) -> list[EssenceMessage]:
+        self.skip_detail_ids = {str(value) for value in skip_detail_ids}
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         if self.pause:
             await asyncio.sleep(0.02)
         self.active -= 1
         return self.messages
+
+    async def get_group_history_times(
+        self,
+        _: object,
+        __: str,
+        *,
+        limit: int,
+    ) -> list[MessageTimeRecord]:
+        self.history_calls += 1
+        if self.history_error:
+            raise OneBotActionError(
+                "get_group_msg_history",
+                status="failed",
+                retcode=1404,
+            )
+        return self.history[:limit]
 
 
 class PluginServiceTests(unittest.TestCase):
@@ -90,6 +122,115 @@ class PluginServiceTests(unittest.TestCase):
             self.assertTrue(
                 all(item["group_id"] == "123456" for item in search.items + recent.items)
             )
+
+    def test_sync_enriches_only_new_missing_times_with_one_history_query(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            message = make_message(sender_time="")
+            message.raw_data = {
+                "essence": {
+                    "message_id": "message-1",
+                    "msg_seq": "200",
+                    "msg_random": "300",
+                }
+            }
+            source = FakeSource(
+                [message],
+                history=[
+                    MessageTimeRecord(
+                        sender_time="2026-08-24 20:00:00",
+                        message_seq="200",
+                        message_random="300",
+                    )
+                ],
+            )
+            repository = EssenceRepository(Path(temp) / "group_essence.db")
+            service = GroupEssencePluginService(
+                source=source,  # type: ignore[arg-type]
+                repository=repository,
+                history_query_limit=100,
+            )
+
+            first = asyncio.run(service.sync(object(), "123456"))
+            second = asyncio.run(service.sync(object(), "123456"))
+
+            self.assertEqual(first.sender_times_enriched, 1)
+            self.assertEqual(source.history_calls, 1)
+            self.assertEqual(second.sender_times_enriched, 0)
+            self.assertEqual(second.unchanged, 1)
+            self.assertEqual(
+                repository.search(sender_qq="10001")[0]["sender_time"],
+                "2026-08-24 20:00:00",
+            )
+
+    def test_history_lookup_failure_does_not_block_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            message = make_message(sender_time="")
+            source = FakeSource([message], history_error=True)
+            repository = EssenceRepository(Path(temp) / "group_essence.db")
+            service = GroupEssencePluginService(
+                source=source,  # type: ignore[arg-type]
+                repository=repository,
+                history_query_limit=100,
+            )
+
+            report = asyncio.run(service.sync(object(), "123456"))
+
+            self.assertEqual(report.inserted, 1)
+            self.assertTrue(report.history_lookup_failed)
+            self.assertEqual(source.history_calls, 1)
+            self.assertEqual(
+                repository.search(sender_qq="10001")[0]["sender_time"],
+                "",
+            )
+
+    def test_explicit_sender_time_repair_is_bounded_and_aggregate_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = EssenceRepository(Path(temp) / "group_essence.db")
+            repository.init_db()
+            missing = make_message(sender_time="")
+            repository.upsert_messages([missing])
+            source = FakeSource(
+                [],
+                history=[
+                    MessageTimeRecord(
+                        sender_time="2026-08-24 20:00:00",
+                        message_id="message-1",
+                    )
+                ],
+            )
+            service = GroupEssencePluginService(
+                source=source,  # type: ignore[arg-type]
+                repository=repository,
+                history_query_limit=20,
+            )
+
+            report = asyncio.run(
+                service.repair_sender_times(object(), "123456", "10")
+            )
+
+            self.assertEqual(report.history_scanned, 1)
+            self.assertEqual((report.updated, report.remaining), (1, 0))
+            self.assertEqual(source.history_calls, 1)
+
+    def test_sync_skips_previously_failed_content_detail_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repository = EssenceRepository(Path(temp) / "group_essence.db")
+            repository.init_db()
+            missing = make_message(content="[空消息]")
+            missing.raw_data = {
+                "essence": {"message_id": "message-1"},
+                "message_detail_error": "OneBot action=get_msg",
+            }
+            repository.upsert_messages([missing])
+            source = FakeSource([missing])
+            service = GroupEssencePluginService(
+                source=source,  # type: ignore[arg-type]
+                repository=repository,
+            )
+
+            asyncio.run(service.sync(object(), "123456"))
+
+            self.assertEqual(source.skip_detail_ids, {"message-1"})
 
     def test_search_rejects_empty_keyword(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

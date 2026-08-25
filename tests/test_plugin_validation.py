@@ -76,6 +76,8 @@ class PluginValidationTests(unittest.TestCase):
                 "allowed_group_ids": ["123456"],
                 "default_group_id": "123456",
                 "max_validation_detail_requests": 100,
+                "max_sync_detail_requests": 100,
+                "history_query_limit": 999,
                 "max_query_results": 100,
             }
         )
@@ -92,6 +94,8 @@ class PluginValidationTests(unittest.TestCase):
         )
         self.assertEqual(settings.max_query_results, 20)
         self.assertEqual(settings.max_validation_detail_requests, 50)
+        self.assertEqual(settings.max_sync_detail_requests, 50)
+        self.assertEqual(settings.history_query_limit, 500)
 
     def test_validation_and_status_do_not_create_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

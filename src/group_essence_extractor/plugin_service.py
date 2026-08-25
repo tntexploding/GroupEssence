@@ -7,7 +7,11 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from .astrbot_source import AstrBotEssenceSource
+from .astrbot_source import (
+    AstrBotEssenceSource,
+    OneBotActionError,
+    apply_history_sender_times,
+)
 from .db import EssenceRepository, SaveStats, SearchPage
 from .models import EssenceMessage
 from .normalization import needs_message_detail
@@ -38,6 +42,7 @@ class StatusReport:
     database_exists: bool
     total: int = 0
     schema_version: int | None = None
+    missing_sender_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -45,7 +50,20 @@ class SyncReport:
     collected: int
     inserted: int
     updated: int
+    refreshed: int
     unchanged: int
+    sender_times_enriched: int = 0
+    history_lookup_failed: bool = False
+
+
+@dataclass(frozen=True)
+class SenderTimeRepairReport:
+    database_exists: bool
+    history_scanned: int = 0
+    candidates: int = 0
+    matched: int = 0
+    updated: int = 0
+    remaining: int = 0
 
 
 class PluginServiceError(RuntimeError):
@@ -61,6 +79,8 @@ class GroupEssencePluginService:
         source: AstrBotEssenceSource,
         repository: EssenceRepository,
         validation_detail_request_limit: int = 10,
+        sync_detail_request_limit: int = 10,
+        history_query_limit: int = 100,
     ) -> None:
         self.source = source
         self.repository = repository
@@ -68,6 +88,11 @@ class GroupEssencePluginService:
             0,
             min(int(validation_detail_request_limit), 50),
         )
+        self.sync_detail_request_limit = max(
+            0,
+            min(int(sync_detail_request_limit), 50),
+        )
+        self.history_query_limit = max(0, min(int(history_query_limit), 500))
         self.operation_lock = asyncio.Lock()
 
     async def validate(self, event: Any, group_id: str) -> ValidationReport:
@@ -82,7 +107,42 @@ class GroupEssencePluginService:
     async def sync(self, event: Any, group_id: str) -> SyncReport:
         normalized_group_id = _require_group_id(group_id)
         async with self.operation_lock:
-            messages = await self.source.get_essence_messages(event, normalized_group_id)
+            previous_failures = await asyncio.to_thread(
+                self.repository.previous_detail_failure_ids,
+                normalized_group_id,
+            )
+            messages = await self.source.get_essence_messages(
+                event,
+                normalized_group_id,
+                detail_request_limit=self.sync_detail_request_limit,
+                skip_detail_ids=previous_failures,
+            )
+            unseen_ids = await asyncio.to_thread(
+                self.repository.unseen_message_ids,
+                normalized_group_id,
+                messages,
+            )
+            sender_times_enriched = 0
+            history_lookup_failed = False
+            history_candidates = {
+                message.message_id
+                for message in messages
+                if message.message_id in unseen_ids and not message.sender_time.strip()
+            }
+            if self.history_query_limit and history_candidates:
+                try:
+                    history = await self.source.get_group_history_times(
+                        event,
+                        normalized_group_id,
+                        limit=self.history_query_limit,
+                    )
+                    messages, sender_times_enriched = apply_history_sender_times(
+                        messages,
+                        history,
+                        candidate_message_ids=history_candidates,
+                    )
+                except OneBotActionError:
+                    history_lookup_failed = True
             try:
                 stats = await asyncio.to_thread(self._persist_messages, messages)
             except Exception as exc:
@@ -91,7 +151,45 @@ class GroupEssencePluginService:
             collected=len(messages),
             inserted=stats.inserted,
             updated=stats.updated,
+            refreshed=stats.refreshed,
             unchanged=stats.unchanged,
+            sender_times_enriched=sender_times_enriched,
+            history_lookup_failed=history_lookup_failed,
+        )
+
+    async def repair_sender_times(
+        self,
+        event: Any,
+        group_id: str,
+        requested_limit: Any = None,
+    ) -> SenderTimeRepairReport:
+        normalized_group_id = _require_group_id(group_id)
+        if not self.repository.db_path.is_file():
+            return SenderTimeRepairReport(database_exists=False)
+        if self.history_query_limit <= 0:
+            raise PluginServiceError("群历史时间补全已关闭。", "history_disabled")
+        limit = _clamp_history_limit(requested_limit, self.history_query_limit)
+        async with self.operation_lock:
+            history = await self.source.get_group_history_times(
+                event,
+                normalized_group_id,
+                limit=limit,
+            )
+            try:
+                stats = await asyncio.to_thread(
+                    self.repository.backfill_sender_times,
+                    normalized_group_id,
+                    history,
+                )
+            except Exception as exc:
+                raise PluginServiceError("发送时间补全失败。", type(exc).__name__) from None
+        return SenderTimeRepairReport(
+            database_exists=True,
+            history_scanned=len(history),
+            candidates=stats.candidates,
+            matched=stats.matched,
+            updated=stats.updated,
+            remaining=stats.remaining,
         )
 
     async def search(self, group_id: str, keyword: str, limit: int) -> SearchPage:
@@ -126,6 +224,9 @@ class GroupEssencePluginService:
             database_exists=True,
             total=int(audit.get("total") or 0),
             schema_version=int(audit.get("schema_version") or 0),
+            missing_sender_time=int(
+                (audit.get("missing") or {}).get("sender_time") or 0
+            ),
         )
 
     def _persist_messages(self, messages: list[EssenceMessage]) -> SaveStats:
@@ -236,6 +337,7 @@ def format_status_report(
             (
                 f"记录数量：{report.total}",
                 f"数据库版本：{report.schema_version}",
+                f"发送时间缺失：{report.missing_sender_time}",
             )
         )
     return "\n".join(lines)
@@ -249,7 +351,26 @@ def format_sync_report(report: SyncReport) -> str:
             f"采集数量：{report.collected}",
             f"新增：{report.inserted}",
             f"更新：{report.updated}",
+            f"元数据刷新：{report.refreshed}",
             f"未变化：{report.unchanged}",
+            f"新记录时间补全：{report.sender_times_enriched}",
+            f"历史查询失败：{'是' if report.history_lookup_failed else '否'}",
+        )
+    )
+
+
+def format_sender_time_repair_report(report: SenderTimeRepairReport) -> str:
+    if not report.database_exists:
+        return "发送时间补全\n数据库尚未初始化，请先执行精华同步。"
+    return "\n".join(
+        (
+            "发送时间补全完成",
+            "目标群：已授权",
+            f"历史元数据：{report.history_scanned}",
+            f"待补记录：{report.candidates}",
+            f"匹配：{report.matched}",
+            f"更新：{report.updated}",
+            f"仍缺失：{report.remaining}",
         )
     )
 
@@ -334,3 +455,18 @@ def _clamp_content_limit(value: Any) -> int:
     except (TypeError, ValueError):
         parsed = 300
     return max(50, min(parsed, 2000))
+
+
+def _clamp_history_limit(value: Any, maximum: int) -> int:
+    if value is None or not str(value).strip():
+        return maximum
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise PluginServiceError("历史数量必须是正整数。", "invalid_history_limit") from None
+    if parsed < 1 or parsed > maximum:
+        raise PluginServiceError(
+            f"历史数量必须在 1 到 {maximum} 之间。",
+            "invalid_history_limit",
+        )
+    return parsed

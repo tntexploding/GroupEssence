@@ -13,7 +13,7 @@ from group_essence_extractor.db import (
     MigrationStats,
     SaveStats,
 )
-from group_essence_extractor.models import EssenceMessage
+from group_essence_extractor.models import EssenceMessage, MessageTimeRecord
 
 
 def make_message(**overrides: str) -> EssenceMessage:
@@ -59,6 +59,107 @@ class EssenceRepositoryTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sender_time"], "2026-05-01 09:59:59")
         self.assertEqual(rows[0]["content_text"], "更新后的活动通知")
+
+    def test_upsert_classifies_volatile_onebot_payload_as_refresh(self) -> None:
+        original = make_message(image_path="https://example.test/image?sig=one")
+        original.raw_data = {"essence": {"message_id": "message-1", "token": "one"}}
+        self.repo.upsert_messages([original])
+
+        refreshed = make_message(image_path="https://example.test/image?sig=two")
+        refreshed.raw_data = {"essence": {"message_id": "message-1", "token": "two"}}
+
+        self.assertEqual(
+            self.repo.upsert_messages([refreshed]),
+            SaveStats(refreshed=1),
+        )
+
+    def test_upsert_does_not_erase_repaired_time_or_ocr_with_blank_values(self) -> None:
+        original = make_message(ocr_text="图片中的补充正文")
+        self.repo.upsert_messages([original])
+
+        incomplete = make_message(sender_time="", ocr_text="")
+        self.assertEqual(
+            self.repo.upsert_messages([incomplete]),
+            SaveStats(unchanged=1),
+        )
+        row = self.repo.search(content="图片中的补充正文")[0]
+        self.assertEqual(row["sender_time"], "2026-05-01 10:00:00")
+        self.assertEqual(row["ocr_text"], "图片中的补充正文")
+
+    def test_history_backfill_matches_sequence_and_survives_next_sync(self) -> None:
+        message = make_message(sender_time="")
+        message.raw_data = {
+            "essence": {
+                "message_id": "message-1",
+                "msg_seq": "200",
+                "msg_random": "300",
+            }
+        }
+        self.repo.upsert_messages([message])
+
+        stats = self.repo.backfill_sender_times(
+            "123456",
+            [
+                MessageTimeRecord(
+                    sender_time="2026-05-01 10:00:00",
+                    message_seq="200",
+                    message_random="300",
+                )
+            ],
+        )
+
+        self.assertEqual(
+            (stats.candidates, stats.matched, stats.updated, stats.remaining),
+            (1, 1, 1, 0),
+        )
+        self.assertEqual(self.repo.upsert_messages([message]), SaveStats(unchanged=1))
+        self.assertEqual(
+            self.repo.search(sender_qq="10001")[0]["sender_time"],
+            "2026-05-01 10:00:00",
+        )
+
+    def test_history_backfill_ignores_blank_time_and_ambiguous_sequence(self) -> None:
+        message = make_message(sender_time="")
+        message.raw_data = {
+            "essence": {"message_id": "message-1", "msg_seq": "200"}
+        }
+        self.repo.upsert_messages([message])
+
+        stats = self.repo.backfill_sender_times(
+            "123456",
+            [
+                MessageTimeRecord(sender_time="", message_id="message-1"),
+                MessageTimeRecord(
+                    sender_time="2026-05-01 10:00:00",
+                    message_id="history-1",
+                    message_seq="200",
+                ),
+                MessageTimeRecord(
+                    sender_time="2026-05-01 10:01:00",
+                    message_id="history-2",
+                    message_seq="200",
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            (stats.candidates, stats.matched, stats.updated, stats.remaining),
+            (1, 0, 0, 1),
+        )
+        self.assertEqual(self.repo.search(sender_qq="10001")[0]["sender_time"], "")
+
+    def test_previous_detail_failures_are_read_without_creating_new_requests(self) -> None:
+        message = make_message(content_text="[空消息]")
+        message.raw_data = {
+            "essence": {"message_id": "message-1"},
+            "message_detail_error": "OneBot action=get_msg",
+        }
+        self.repo.upsert_messages([message])
+
+        self.assertEqual(
+            self.repo.previous_detail_failure_ids("123456"),
+            {"message-1"},
+        )
 
     def test_schema_migration_is_versioned_and_idempotent(self) -> None:
         self.assertEqual(

@@ -8,12 +8,13 @@
 ## 功能
 
 - 可直接从仓库安装为 AstrBot 插件，提供 `/精华验收`、`/精华同步`、
-  `/精华查询`、`/精华最近` 和 `/精华状态`。
+  `/精华补全时间`、`/精华查询`、`/精华最近` 和 `/精华状态`。
 - 插件默认只读，只允许配置中的管理员与群白名单，所有匹配指令均阻止进入 LLM。
 - 插件通过当前 AIOCQHTTP 事件调用 OneBot Action，不保存 NapCat 地址或 Token。
 - 支持 NapCat / go-cqhttp 兼容的 `get_essence_msg_list` 接口。
-- 精华列表缺少正文时，通过 `get_msg` 补全单条消息；仅缺发送时间时保留为空，避免
-  对已无法回查的历史消息产生无效请求。
+- 精华列表缺少正文时，通过有界的 `get_msg` 请求补全；已失败的旧消息不会在每次
+  同步中重复请求。新精华缺少发送时间时，只读取一次有界群历史元数据进行匹配；
+  已入库记录可由管理员显式补全。
 - OneBot 失败或没有数据时，可扫描截图目录并使用 Tesseract OCR。
 - 可在不连接 NapCat、不创建数据库的情况下预览截图 OCR 质量。
 - 保存发送者、发送时间、精华时间、设置人、正文、图片地址和原始响应。
@@ -82,6 +83,8 @@ admin_ids = [管理员 QQ 号]
 allowed_group_ids = [一个测试群号]
 default_group_id = 测试群号（仅私聊需要）
 max_validation_detail_requests = 10
+max_sync_detail_requests = 10
+history_query_limit = 100
 enable_image_enrichment = false
 enable_scheduled_sync = false
 ```
@@ -101,11 +104,15 @@ enable_scheduled_sync = false
 ```text
 /精华同步
 /精华同步
+/精华补全时间 100
 /精华查询 脱敏关键词
 /精华最近 5
 ```
 
-第二次同步应主要为“未变化”。插件数据库按需位于 AstrBot 数据根目录下的
+第二次同步应主要为“未变化”；若 OneBot 原始结构或短期图片地址改变，只应计入
+“元数据刷新”，不应误报业务记录更新。`/精华补全时间` 只读取群历史中的消息身份和
+时间，按消息 ID 或无歧义序号匹配，绝不使用精华设置时间代填。插件数据库按需位于
+AstrBot 数据根目录下的
 `plugin_data/astrbot_plugin_group_essence/group_essence.db`，不会读写本仓库默认的
 `data/group_essence.db`。完整安装、验收、故障定位与回滚步骤见
 [`docs/ASTRBOT_DEPLOYMENT.md`](docs/ASTRBOT_DEPLOYMENT.md)。
@@ -414,10 +421,11 @@ python -m pip check
   新增解析策略。
 - 已失效或需要额外登录态的 OneBot 图片地址会记录为失败，需在可访问图片的环境重试。
 - 正文检索使用 SQLite `LIKE`，数据量较大时可升级为 FTS5。
-- OneBot 不同实现的返回字段可能存在差异；补全逻辑目前面向标准
-  `get_essence_msg_list` 与 `get_msg` 响应。
-- NapCat 精华列表可能不提供历史消息的发送时间。程序不会用精华设置时间代替；若
-  必须恢复，应另行实现群历史消息分页与 `message_id` 匹配。
+- OneBot 不同实现的返回字段可能存在差异；补全逻辑目前面向
+  `get_essence_msg_list`、`get_msg` 与 `get_group_msg_history` 响应。
+- NapCat 精华列表可能不提供历史消息的发送时间。插件只查询配置上限内的近期群历史，
+  不会自动分页扫描全部历史，也不会用精华设置时间代替；超出可回查窗口的记录会继续
+  保持缺失。
 - API 尚未内置用户系统、签名或访问令牌校验。
 
 ## 许可证

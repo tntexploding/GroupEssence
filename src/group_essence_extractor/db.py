@@ -6,9 +6,9 @@ from datetime import datetime
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-from .models import EssenceMessage
+from .models import EssenceMessage, MessageTimeRecord
 
 
 SCHEMA_VERSION = 2
@@ -91,19 +91,34 @@ MESSAGE_COLUMNS = (
     "raw_json",
 )
 
+PERSISTED_RAW_METADATA_KEYS = (
+    "sender_time_source",
+    "sender_time_repair",
+)
+
 
 @dataclass(frozen=True)
 class SaveStats:
     inserted: int = 0
     updated: int = 0
+    refreshed: int = 0
     unchanged: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
             "inserted": self.inserted,
             "updated": self.updated,
+            "refreshed": self.refreshed,
             "unchanged": self.unchanged,
         }
+
+
+@dataclass(frozen=True)
+class SenderTimeBackfillStats:
+    candidates: int = 0
+    matched: int = 0
+    updated: int = 0
+    remaining: int = 0
 
 
 @dataclass(frozen=True)
@@ -352,27 +367,39 @@ class EssenceRepository:
         """
         inserted = 0
         updated = 0
+        refreshed = 0
         unchanged = 0
         with closing(self._connect()) as conn, conn:
             for msg in messages:
                 values = self._message_values(msg)
                 existing = self._find_existing(conn, msg)
                 if existing is not None:
-                    old_values = tuple(
-                        existing[column] if existing[column] is not None else ""
+                    old_values = {
+                        column: existing[column] if existing[column] is not None else ""
                         for column in MESSAGE_COLUMNS
-                    )
-                    new_values = tuple(values[column] for column in MESSAGE_COLUMNS)
-                    if old_values == new_values:
+                    }
+                    merged_values = _merge_upsert_values(old_values, values)
+                    changed_columns = {
+                        column
+                        for column in MESSAGE_COLUMNS
+                        if old_values[column] != merged_values[column]
+                    }
+                    if not changed_columns:
                         unchanged += 1
                         continue
 
                     assignments = ", ".join(f"{column} = ?" for column in MESSAGE_COLUMNS)
                     conn.execute(
                         f"UPDATE essence_messages SET {assignments} WHERE id = ?",
-                        (*new_values, existing["id"]),
+                        (
+                            *(merged_values[column] for column in MESSAGE_COLUMNS),
+                            existing["id"],
+                        ),
                     )
-                    updated += 1
+                    if _is_refresh_only(msg.source, changed_columns):
+                        refreshed += 1
+                    else:
+                        updated += 1
                     continue
 
                 cursor = conn.execute(
@@ -383,11 +410,136 @@ class EssenceRepository:
                     inserted += 1
                 else:
                     unchanged += 1
-        return SaveStats(inserted=inserted, updated=updated, unchanged=unchanged)
+        return SaveStats(
+            inserted=inserted,
+            updated=updated,
+            refreshed=refreshed,
+            unchanged=unchanged,
+        )
 
     def insert_messages(self, messages: Iterable[EssenceMessage]) -> int:
         """兼容旧调用方，仅返回实际新增记录数。"""
         return self.upsert_messages(messages).inserted
+
+    def unseen_message_ids(
+        self,
+        group_id: str,
+        messages: Iterable[EssenceMessage],
+    ) -> set[str]:
+        """返回数据库尚未持久化的 OneBot 消息 ID，且不创建数据库。"""
+        candidates = {
+            message.message_id.strip()
+            for message in messages
+            if message.source == "onebot" and message.message_id.strip()
+        }
+        if not candidates or not self.db_path.is_file():
+            return candidates
+        with closing(self._connect(read_only=True)) as conn:
+            rows = conn.execute(
+                """
+                SELECT message_id
+                FROM essence_messages
+                WHERE source = 'onebot' AND group_id = ?
+                  AND message_id IS NOT NULL AND TRIM(message_id) <> ''
+                """,
+                (str(group_id or "").strip(),),
+            ).fetchall()
+        existing = {str(row[0]).strip() for row in rows if str(row[0] or "").strip()}
+        return candidates - existing
+
+    def previous_detail_failure_ids(self, group_id: str) -> set[str]:
+        """读取已记录的详情失败 ID，防止每次同步重复请求同一旧消息。"""
+        if not self.db_path.is_file():
+            return set()
+        with closing(self._connect(read_only=True)) as conn:
+            rows = conn.execute(
+                """
+                SELECT message_id, raw_json
+                FROM essence_messages
+                WHERE source = 'onebot' AND group_id = ?
+                  AND message_id IS NOT NULL AND TRIM(message_id) <> ''
+                """,
+                (str(group_id or "").strip(),),
+            ).fetchall()
+        return {
+            str(row["message_id"]).strip()
+            for row in rows
+            if _load_raw_json(row["raw_json"]).get("message_detail_error")
+        }
+
+    def backfill_sender_times(
+        self,
+        group_id: str,
+        history: Iterable[MessageTimeRecord],
+    ) -> SenderTimeBackfillStats:
+        """只补空缺发送时间，并以脱敏元数据记录来源。"""
+        if not self.db_path.is_file():
+            return SenderTimeBackfillStats()
+        by_id, by_sequence_random, by_sequence = _history_record_indexes(history)
+        normalized_group_id = str(group_id or "").strip()
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """
+                SELECT id, message_id, raw_json
+                FROM essence_messages
+                WHERE source = 'onebot' AND group_id = ?
+                  AND (sender_time IS NULL OR TRIM(sender_time) = '')
+                ORDER BY id
+                """,
+                (normalized_group_id,),
+            ).fetchall()
+            matched = 0
+            updated = 0
+            for row in rows:
+                raw = _load_raw_json(row["raw_json"])
+                essence = raw.get("essence")
+                if not isinstance(essence, dict):
+                    essence = {}
+                sequence = _mapping_identity(
+                    essence,
+                    "msg_seq",
+                    "message_seq",
+                    "real_seq",
+                    "seq",
+                )
+                random_value = _mapping_identity(
+                    essence,
+                    "msg_random",
+                    "message_random",
+                    "random",
+                )
+                message_id = str(row["message_id"] or "").strip()
+                record = by_id.get(message_id)
+                if record is None and sequence and random_value:
+                    record = by_sequence_random.get(f"{sequence}:{random_value}")
+                if record is None and sequence:
+                    record = by_sequence.get(sequence)
+                if record is None:
+                    continue
+
+                matched += 1
+                raw["sender_time_source"] = "group_history"
+                raw["sender_time_repair"] = {"source": "group_history"}
+                cursor = conn.execute(
+                    """
+                    UPDATE essence_messages
+                    SET sender_time = ?, raw_json = ?
+                    WHERE id = ? AND (sender_time IS NULL OR TRIM(sender_time) = '')
+                    """,
+                    (
+                        record.sender_time,
+                        json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                        int(row["id"]),
+                    ),
+                )
+                updated += max(0, cursor.rowcount)
+        candidates = len(rows)
+        return SenderTimeBackfillStats(
+            candidates=candidates,
+            matched=matched,
+            updated=updated,
+            remaining=max(0, candidates - updated),
+        )
 
     @staticmethod
     def _message_values(msg: EssenceMessage) -> dict[str, str]:
@@ -795,6 +947,122 @@ class EssenceRepository:
                 conditions.append(f"{column} {operator} ?")
                 params.append(value)
         return conditions, params
+
+
+def _merge_upsert_values(
+    old_values: dict[str, str],
+    new_values: dict[str, str],
+) -> dict[str, str]:
+    """合并同步结果，避免上游空值抹掉已修复字段或 OCR 数据。"""
+    merged = dict(new_values)
+    for column in (
+        "group_id",
+        "message_id",
+        "sender_id",
+        "sender_time",
+        "essence_time",
+        "operator_id",
+        "image_path",
+        "ocr_text",
+    ):
+        if _is_blank(merged[column]) and not _is_blank(old_values[column]):
+            merged[column] = old_values[column]
+
+    if merged["sender"] in {"", "未知发送者"} and old_values["sender"]:
+        merged["sender"] = old_values["sender"]
+    if merged["operator"] in {"", "未知设置人"} and old_values["operator"]:
+        merged["operator"] = old_values["operator"]
+
+    incoming_content_missing = merged["content_text"] in {"", "[空消息]"}
+    if incoming_content_missing and old_values["content_text"] not in {"", "[空消息]"}:
+        for column in ("content_text", "content_type", "image_path"):
+            merged[column] = old_values[column]
+
+    merged["content_search"] = _normalized_search_text(
+        merged["content_text"],
+        merged["ocr_text"],
+    )
+    merged["raw_json"] = _merge_raw_json(
+        old_values["raw_json"],
+        merged["raw_json"],
+        preserve_detail_failure=incoming_content_missing,
+    )
+    return merged
+
+
+def _merge_raw_json(
+    old_value: str,
+    new_value: str,
+    *,
+    preserve_detail_failure: bool,
+) -> str:
+    old_raw = _load_raw_json(old_value)
+    new_raw = _load_raw_json(new_value)
+    if not new_raw:
+        return old_value if old_raw else new_value
+    for key in PERSISTED_RAW_METADATA_KEYS:
+        if key not in new_raw and key in old_raw:
+            new_raw[key] = old_raw[key]
+    if preserve_detail_failure:
+        for key in ("message_detail_error", "message_detail_requested"):
+            if key not in new_raw and key in old_raw:
+                new_raw[key] = old_raw[key]
+    return json.dumps(new_raw, ensure_ascii=False, sort_keys=True)
+
+
+def _is_refresh_only(source: str, changed_columns: set[str]) -> bool:
+    refresh_columns = {"raw_json"}
+    if source == "onebot":
+        refresh_columns.add("image_path")
+    return bool(changed_columns) and changed_columns.issubset(refresh_columns)
+
+
+def _history_record_indexes(
+    history: Iterable[MessageTimeRecord],
+) -> tuple[
+    dict[str, MessageTimeRecord],
+    dict[str, MessageTimeRecord],
+    dict[str, MessageTimeRecord],
+]:
+    records = [record for record in history if record.sender_time.strip()]
+    return (
+        _unique_history_index(records, lambda record: record.message_id),
+        _unique_history_index(
+            records,
+            lambda record: (
+                f"{record.message_seq}:{record.message_random}"
+                if record.message_seq and record.message_random
+                else ""
+            ),
+        ),
+        _unique_history_index(records, lambda record: record.message_seq),
+    )
+
+
+def _unique_history_index(
+    records: Iterable[MessageTimeRecord],
+    key_builder: Callable[[MessageTimeRecord], str],
+) -> dict[str, MessageTimeRecord]:
+    index: dict[str, MessageTimeRecord] = {}
+    ambiguous: set[str] = set()
+    for record in records:
+        key = key_builder(record)
+        if not key or key in ambiguous:
+            continue
+        if key in index and index[key] != record:
+            index.pop(key, None)
+            ambiguous.add(key)
+            continue
+        index[key] = record
+    return index
+
+
+def _mapping_identity(value: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        item = value.get(key)
+        if item is not None and str(item).strip():
+            return str(item).strip()
+    return ""
 
 
 def _repair_updates(row: sqlite3.Row, default_group_id: str) -> dict[str, str]:

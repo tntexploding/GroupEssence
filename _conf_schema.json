@@ -29,6 +29,18 @@
     "hint": "只对正文缺失的精华调用 get_msg，代码会将该值限制在 0 到 50；0 表示验收时完全不补全。",
     "default": 10
   },
+  "max_sync_detail_requests": {
+    "description": "同步时最多补全正文数量",
+    "type": "int",
+    "hint": "仅请求此前未失败的正文缺失项，代码会限制在 0 到 50；失败记录不会在每次同步中重复请求。",
+    "default": 10
+  },
+  "history_query_limit": {
+    "description": "发送时间历史查询上限",
+    "type": "int",
+    "hint": "同步发现新精华或执行发送时间补全时，单次最多读取的群历史条数；范围 0 到 500，0 表示关闭。",
+    "default": 100
+  },
   "max_query_results": {
     "description": "单次查询最多返回数量",
     "type": "int",

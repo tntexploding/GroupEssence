@@ -7,6 +7,10 @@
 > 2026-08-25 阶段 A 实测修订：NapCat 的精华列表可能缺少历史发送时间，而旧消息
 > 无法再由 `get_msg` 回查。因此详情请求只由正文缺失触发；发送时间缺失保留为质量
 > 字段，不使用精华时间代填。验收详情请求另设数量上限。
+>
+> 阶段 B 后续实现：正式同步同样限制详情请求并记住已失败的旧消息；新精华可用一次
+> 有界群历史查询补全发送时间，既有记录使用管理员命令显式补全。历史正文和发送者不
+> 进入时间索引，插件仍不监听全部群消息。
 
 ## 1. 决策与目标
 
@@ -195,6 +199,8 @@ Uvicorn、Pillow 等完整应用依赖，直接让 AstrBot 安装这些固定版
 | `allowed_group_ids` | list | `[]` | 必须显式填写，空列表拒绝所有目标群 |
 | `default_group_id` | string | `""` | 私聊指令使用的默认目标群，且必须在白名单内 |
 | `max_validation_detail_requests` | int | `10` | 验收阶段最多补全正文数量，代码限制为 0–50 |
+| `max_sync_detail_requests` | int | `10` | 正式同步最多补全正文数量，代码限制为 0–50 |
+| `history_query_limit` | int | `100` | 单次群历史时间匹配上限，代码限制为 0–500；0 为关闭 |
 | `max_query_results` | int | `5` | 单次最多返回数量，代码中再限制为 1–20 |
 | `max_content_chars` | int | `300` | 单条正文最大呈递字符数 |
 | `enable_image_enrichment` | bool | `false` | 第一版保持关闭 |
@@ -284,6 +290,7 @@ async def validate_essence(self, event: AstrMessageEvent, group_id: str = ""):
 
 ```text
 /精华同步 [群号]
+/精华补全时间 [数量]
 /精华查询 <关键词>
 /精华最近 [数量]
 /精华状态
@@ -292,6 +299,9 @@ async def validate_essence(self, event: AstrMessageEvent, group_id: str = ""):
 行为约束：
 
 - `精华同步` 先取得并标准化全部项目，再在单个受控数据库操作中 upsert；
+- 新记录缺发送时间时至多发出一次有界群历史请求；既有记录只由
+  `精华补全时间` 显式修复；
+- 时间匹配只使用消息 ID、序号、随机号和时间，不持久化群历史正文或发送者；
 - `精华查询` 必须限定目标群，不能跨白名单群返回结果；
 - 空关键词拒绝执行，不允许用空字符串导出整个数据库；
 - `精华最近` 的数量限制在 1–20；
@@ -316,6 +326,7 @@ async def validate_essence(self, event: AstrMessageEvent, group_id: str = ""):
 class GroupEssencePluginService:
     async def validate(self, event, group_id: str) -> ValidationReport: ...
     async def sync(self, event, group_id: str) -> SyncReport: ...
+    async def repair_sender_times(self, event, group_id: str, requested_limit) -> SenderTimeRepairReport: ...
     async def search(self, group_id: str, keyword: str, limit: int) -> SearchPage: ...
     async def recent(self, group_id: str, limit: int) -> SearchPage: ...
     async def status(self) -> StatusReport: ...
@@ -337,9 +348,10 @@ async with self.operation_lock:
 锁保证简单可靠，确认负载后再拆分读写锁。不要在 `__init__` 中做同步迁移或创建
 后台任务；数据库可在第一次需要写入时惰性初始化。
 
-`validate` 应把 `max_validation_detail_requests` 作为仅本次验收的上限传给 Action
-适配器；`sync` 不复用该上限。报告必须区分正文缺失候选数、实际详情请求数、跳过数
-和失败数。
+`validate` 应把 `max_validation_detail_requests` 作为本次验收的上限传给 Action
+适配器；`sync` 使用独立的 `max_sync_detail_requests`，并跳过数据库已记录失败的
+旧消息。时间补全使用 `history_query_limit`，单次调用不自动分页。报告必须区分正文
+缺失候选数、实际详情请求数、跳过数和失败数，也必须区分业务更新与元数据刷新。
 
 ## 8. 持久化目录
 
@@ -417,6 +429,8 @@ image_dir = data_dir / "images"
 - 正文存在但 `sender_time` 缺失时不调用 `get_msg`，且发送时间保持空值；
 - 验收详情请求达到上限后不再调用 `get_msg`；
 - 单条 `get_msg` 失败仍保留记录；
+- 已失败详情不会在下一次同步重复请求；
+- 群历史匹配有歧义时不补时间，历史接口失败时仍可完成同步；
 - 时间戳、图文段、发送者和设置人标准化与原 HTTP 客户端一致；
 - 响应错误不会把原始 payload 写进公开异常。
 
@@ -469,9 +483,10 @@ AstrBot 入口测试可在 AstrBot 开发环境中运行；核心测试环境不
 1. 设置 `validation_mode=false`；
 2. 执行一次 `/精华同步`；
 3. 立即再次执行相同命令；
-4. 第二次在无新数据时应主要为 `unchanged`，不得重复新增；
-5. 用脱敏关键字执行 `/精华查询`；
-6. 重启 AstrBot 容器后再次查询，确认数据仍存在。
+4. 第二次在无新数据时应主要为 `unchanged`；短期 URL 变化只能计入 `refreshed`；
+5. 执行 `/精华补全时间 100`，再用 `/精华状态` 核对剩余缺失数；
+6. 用脱敏关键字执行 `/精华查询`；
+7. 重启 AstrBot 容器后再次查询，确认数据仍存在。
 
 ### 阶段 C：有限生产使用
 

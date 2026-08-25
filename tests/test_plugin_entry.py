@@ -91,11 +91,40 @@ class FakeService:
 
     async def status(self) -> SimpleNamespace:
         self.calls.append(("status",))
-        return SimpleNamespace(database_exists=False, total=0, schema_version=None)
+        return SimpleNamespace(
+            database_exists=False,
+            total=0,
+            schema_version=None,
+            missing_sender_time=0,
+        )
 
     async def sync(self, _: object, group_id: str) -> SimpleNamespace:
         self.calls.append(("sync", group_id))
-        return SimpleNamespace(collected=1, inserted=1, updated=0, unchanged=0)
+        return SimpleNamespace(
+            collected=1,
+            inserted=1,
+            updated=0,
+            refreshed=0,
+            unchanged=0,
+            sender_times_enriched=0,
+            history_lookup_failed=False,
+        )
+
+    async def repair_sender_times(
+        self,
+        _: object,
+        group_id: str,
+        count: str,
+    ) -> SimpleNamespace:
+        self.calls.append(("repair_sender_times", group_id, count))
+        return SimpleNamespace(
+            database_exists=True,
+            history_scanned=10,
+            candidates=2,
+            matched=1,
+            updated=1,
+            remaining=1,
+        )
 
     async def search(self, group_id: str, keyword: str, limit: int) -> SimpleNamespace:
         self.calls.append(("search", group_id, keyword, limit))
@@ -192,6 +221,8 @@ class PluginEntryTests(unittest.TestCase):
                 )
                 self.assertFalse((data_root / "plugin_data").exists())
                 self.assertEqual(plugin.service.validation_detail_request_limit, 10)
+                self.assertEqual(plugin.service.sync_detail_request_limit, 10)
+                self.assertEqual(plugin.service.history_query_limit, 100)
                 plugin.service = FakeService()
                 event = FakeEvent()
 
@@ -246,6 +277,7 @@ class PluginEntryTests(unittest.TestCase):
                 sync_event = FakeEvent()
                 search_event = FakeEvent()
                 recent_event = FakeEvent()
+                repair_event = FakeEvent()
 
                 sync_results = asyncio.run(
                     collect_results(plugin.sync_essence(sync_event))
@@ -256,14 +288,19 @@ class PluginEntryTests(unittest.TestCase):
                 recent_results = asyncio.run(
                     collect_results(plugin.recent_essence(recent_event, "3"))
                 )
+                repair_results = asyncio.run(
+                    collect_results(plugin.repair_sender_times(repair_event, "10"))
+                )
 
                 self.assertEqual(sync_event.stop_calls, 1)
                 self.assertEqual(search_event.stop_calls, 1)
                 self.assertEqual(recent_event.stop_calls, 1)
+                self.assertEqual(repair_event.stop_calls, 1)
                 self.assertTrue(all("只读验收模式" in item[0] for item in (
                     sync_results,
                     search_results,
                     recent_results,
+                    repair_results,
                 )))
                 self.assertEqual(service.calls, [])
                 self.assertFalse((data_root / "plugin_data").exists())
@@ -285,6 +322,7 @@ class PluginEntryTests(unittest.TestCase):
                 sync_event = FakeEvent()
                 search_event = FakeEvent()
                 recent_event = FakeEvent()
+                repair_event = FakeEvent()
 
                 sync_results = asyncio.run(
                     collect_results(plugin.sync_essence(sync_event, "654321"))
@@ -295,19 +333,25 @@ class PluginEntryTests(unittest.TestCase):
                 recent_results = asyncio.run(
                     collect_results(plugin.recent_essence(recent_event, "2"))
                 )
+                repair_results = asyncio.run(
+                    collect_results(plugin.repair_sender_times(repair_event, "20"))
+                )
 
                 self.assertEqual(sync_event.stop_calls, 1)
                 self.assertEqual(search_event.stop_calls, 1)
                 self.assertEqual(recent_event.stop_calls, 1)
+                self.assertEqual(repair_event.stop_calls, 1)
                 self.assertIn("精华同步完成", sync_results[0])
                 self.assertIn("未找到匹配记录", search_results[0])
                 self.assertIn("未找到匹配记录", recent_results[0])
+                self.assertIn("发送时间补全完成", repair_results[0])
                 self.assertEqual(
                     service.calls,
                     [
                         ("sync", "654321"),
                         ("search", "123456", "活动", 4),
                         ("recent", "123456", 2),
+                        ("repair_sender_times", "123456", "20"),
                     ],
                 )
 
@@ -375,6 +419,17 @@ class PluginEntryTests(unittest.TestCase):
                             "sqlite_error",
                         )
 
+                    async def repair_sender_times(
+                        self,
+                        _: object,
+                        __: str,
+                        ___: str,
+                    ) -> object:
+                        raise plugin_main.PluginServiceError(
+                            "发送时间补全失败。",
+                            "sqlite_error",
+                        )
+
                 plugin = plugin_main.GroupEssencePlugin(
                     object(),
                     {
@@ -384,7 +439,7 @@ class PluginEntryTests(unittest.TestCase):
                     },
                 )
                 plugin.service = FailingService()
-                events = [FakeEvent() for _ in range(5)]
+                events = [FakeEvent() for _ in range(6)]
 
                 results = [
                     asyncio.run(collect_results(plugin.validate_essence(events[0]))),
@@ -394,6 +449,9 @@ class PluginEntryTests(unittest.TestCase):
                         collect_results(plugin.search_essence(events[3], "关键词"))
                     ),
                     asyncio.run(collect_results(plugin.recent_essence(events[4], "5"))),
+                    asyncio.run(
+                        collect_results(plugin.repair_sender_times(events[5], "10"))
+                    ),
                 ]
 
                 self.assertTrue(all(event.stop_calls == 1 for event in events))

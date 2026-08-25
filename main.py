@@ -17,6 +17,7 @@ from .src.group_essence_extractor.plugin_service import (
     GroupEssencePluginService,
     PluginServiceError,
     format_search_page,
+    format_sender_time_repair_report,
     format_status_report,
     format_sync_report,
     format_validation_report,
@@ -41,6 +42,8 @@ class GroupEssencePlugin(Star):
             validation_detail_request_limit=(
                 self.settings.max_validation_detail_requests
             ),
+            sync_detail_request_limit=self.settings.max_sync_detail_requests,
+            history_query_limit=self.settings.history_query_limit,
         )
 
     @filter.command("精华验收")
@@ -138,9 +141,54 @@ class GroupEssencePlugin(Star):
         logger.info(
             "GroupEssence 同步完成："
             f"collected={report.collected}, inserted={report.inserted}, "
-            f"updated={report.updated}, unchanged={report.unchanged}"
+            f"updated={report.updated}, refreshed={report.refreshed}, "
+            f"unchanged={report.unchanged}, "
+            f"sender_times_enriched={report.sender_times_enriched}, "
+            f"history_lookup_failed={report.history_lookup_failed}"
         )
         yield event.plain_result(format_sync_report(report))
+
+    @filter.command("精华补全时间")
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    async def repair_sender_times(
+        self,
+        event: AstrMessageEvent,
+        count: str = "",
+    ):
+        """以有界群历史补全数据库中缺失的真实发送时间。"""
+        event.stop_event()
+        target = self.settings.resolve_authorized_group(event)
+        if target is None:
+            yield event.plain_result("无权限或目标群未在允许列表中。")
+            return
+        if self.settings.validation_mode:
+            yield event.plain_result("当前处于只读验收模式，未执行补全。")
+            return
+
+        try:
+            report = await self.service.repair_sender_times(event, target, count)
+        except OneBotActionError as exc:
+            logger.warning(f"GroupEssence 发送时间补全失败：{exc.public_message}")
+            yield event.plain_result(f"发送时间补全失败：{exc.public_message}")
+            return
+        except PluginServiceError as exc:
+            logger.warning(f"GroupEssence 发送时间补全失败：category={exc.category}")
+            yield event.plain_result(f"发送时间补全失败：{exc.public_message}")
+            return
+        except Exception as exc:
+            logger.error(
+                f"GroupEssence 发送时间补全失败：category={type(exc).__name__}"
+            )
+            yield event.plain_result("发送时间补全失败：内部错误。")
+            return
+
+        logger.info(
+            "GroupEssence 发送时间补全完成："
+            f"history_scanned={report.history_scanned}, "
+            f"candidates={report.candidates}, matched={report.matched}, "
+            f"updated={report.updated}, remaining={report.remaining}"
+        )
+        yield event.plain_result(format_sender_time_repair_report(report))
 
     @filter.command("精华查询")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
