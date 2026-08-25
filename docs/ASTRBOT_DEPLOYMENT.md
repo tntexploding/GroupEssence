@@ -47,6 +47,7 @@ src/
   "admin_ids": ["管理员 QQ 号"],
   "allowed_group_ids": ["测试群号"],
   "default_group_id": "测试群号",
+  "max_validation_detail_requests": 10,
   "max_query_results": 5,
   "max_content_chars": 300,
   "enable_image_enrichment": false,
@@ -66,18 +67,26 @@ src/
 ```
 
 私聊且未配置默认群时，可显式执行 `/精华验收 测试群号`。验收命令只调用
-`get_essence_msg_list`，并在必要时用 `get_msg` 补全；它不创建数据库或数据目录。
+`get_essence_msg_list`，并且只在正文缺失时用 `get_msg` 补全。验收最多发出
+`max_validation_detail_requests` 次详情请求（范围 0–50，默认 10）；它不创建数据库
+或数据目录。报告中的详情统计分别表示候选、实际请求、因上限或缺少消息 ID 而跳过、
+以及失败的数量。
 回复应只有数量、内容类型、缺失字段、字段类型和详情补全计数，不应出现群号、QQ
 号、昵称、正文、图片地址或原始响应。
 
 阶段 A 通过条件：
 
 - 精华数量与群内实际情况相符；
-- `message_id`、发送时间、精华时间和正文缺失量可接受；
+- `message_id`、发送时间、精华时间和正文缺失量已被准确报告；
 - 单条 `get_msg` 失败不会使整批验收失败；
 - 普通聊天仍按原 AstrBot 流程处理，精华指令不会进入 LLM；
 - AstrBot 日志只有 action 状态、异常类别和聚合数量，没有隐私正文或凭据；
 - AstrBot 与 NapCat 没有持续的 CPU 或内存增长。
+
+NapCat 可能不在精华列表中提供历史 `sender_time`，且旧消息已经无法由 `get_msg`
+回查。此时缺失发送时间应继续保留为质量字段，不会触发详情请求，也不会用
+`essence_time` 代填。是否允许这些记录进入阶段 B，应按业务的数据完整性门禁决定；
+如必须恢复真实发送时间，需要另行实现群历史分页匹配。
 
 ## 4. 阶段 B：启用同步与查询
 

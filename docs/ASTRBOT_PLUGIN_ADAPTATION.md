@@ -2,7 +2,11 @@
 
 本文说明如何将 GroupEssence 改造成“可复用核心 + AstrBot 薄适配层”，并通过云端
 现有 AstrBot ↔ NapCat OneBot 链路完成真实环境验收。实现时应同时参考
-[架构说明](./ARCHITECTURE.md) 和 [远端 NapCat 验收指南](./REMOTE_VALIDATION.md)。
+[架构说明](./ARCHITECTURE.md) 和 [AstrBot 远端部署指南](./ASTRBOT_DEPLOYMENT.md)。
+
+> 2026-08-25 阶段 A 实测修订：NapCat 的精华列表可能缺少历史发送时间，而旧消息
+> 无法再由 `get_msg` 回查。因此详情请求只由正文缺失触发；发送时间缺失保留为质量
+> 字段，不使用精华时间代填。验收详情请求另设数量上限。
 
 ## 1. 决策与目标
 
@@ -90,6 +94,9 @@ def normalize_essence_items(
 ) -> list[EssenceMessage]: ...
 ```
 
+`needs_message_detail` 只判断正文是否缺失。仅缺少 `sender_time` 时必须返回 false，
+避免对已经不在 NapCat 回查记录中的历史消息逐条请求。
+
 `_fmt_ts`、`_parse_message_content`、`_pick_id` 和 `_first_value` 也应移入该模块。
 它不得导入 `requests`、FastAPI、AstrBot、Pillow 或 pytesseract。
 
@@ -119,7 +126,7 @@ class AstrBotEssenceSource:
 2. 调用 `get_essence_msg_list(group_id=...)`；
 3. 同时兼容“直接返回 data”和“返回完整 OneBot envelope”；
 4. 校验最终 data 必须是 list；
-5. 仅对缺少正文或发送时间的项目调用 `get_msg`；
+5. 仅对缺少正文的项目调用 `get_msg`；验收模式受配置的请求上限约束；
 6. 单条详情失败时保留精华项目，只设置脱敏后的 `detail_error`；
 7. 调用 `normalization.py` 生成 `EssenceMessage`。
 
@@ -187,6 +194,7 @@ Uvicorn、Pillow 等完整应用依赖，直接让 AstrBot 安装这些固定版
 | `admin_ids` | list | `["2573423682"]` | 可以验收、同步和查询的 QQ 账号 |
 | `allowed_group_ids` | list | `[]` | 必须显式填写，空列表拒绝所有目标群 |
 | `default_group_id` | string | `""` | 私聊指令使用的默认目标群，且必须在白名单内 |
+| `max_validation_detail_requests` | int | `10` | 验收阶段最多补全正文数量，代码限制为 0–50 |
 | `max_query_results` | int | `5` | 单次最多返回数量，代码中再限制为 1–20 |
 | `max_content_chars` | int | `300` | 单条正文最大呈递字符数 |
 | `enable_image_enrichment` | bool | `false` | 第一版保持关闭 |
@@ -264,7 +272,7 @@ async def validate_essence(self, event: AstrMessageEvent, group_id: str = ""):
 采集数量：12
 内容类型：text=9, image=2, mixed=1
 缺失字段：message_id=0, sender_time=0, essence_time=0, content=0
-详情补全：请求=3, 失败=0
+详情补全：候选=3, 请求=3, 跳过=0, 失败=0
 ```
 
 不得回复群号、QQ 号、昵称、正文、图片 URL 或完整 Action 结果。目标群只显示
@@ -328,6 +336,10 @@ async with self.operation_lock:
 建议同步命令也共用该锁，防止多个管理员命令同时请求全量精华。查询可以先共用同一
 锁保证简单可靠，确认负载后再拆分读写锁。不要在 `__init__` 中做同步迁移或创建
 后台任务；数据库可在第一次需要写入时惰性初始化。
+
+`validate` 应把 `max_validation_detail_requests` 作为仅本次验收的上限传给 Action
+适配器；`sync` 不复用该上限。报告必须区分正文缺失候选数、实际详情请求数、跳过数
+和失败数。
 
 ## 8. 持久化目录
 
@@ -402,6 +414,8 @@ image_dir = data_dir / "images"
 - status 非 ok 或 retcode 非 0；
 - 精华 data 不是 list；
 - 缺正文时调用 `get_msg`；
+- 正文存在但 `sender_time` 缺失时不调用 `get_msg`，且发送时间保持空值；
+- 验收详情请求达到上限后不再调用 `get_msg`；
 - 单条 `get_msg` 失败仍保留记录；
 - 时间戳、图文段、发送者和设置人标准化与原 HTTP 客户端一致；
 - 响应错误不会把原始 payload 写进公开异常。
@@ -442,10 +456,13 @@ AstrBot 入口测试可在 AstrBot 开发环境中运行；核心测试环境不
 
 - `get_essence_msg_list` 成功；
 - 返回数量符合群内实际情况；
-- `message_id`、发送时间、精华时间和正文缺失数可接受；
+- `message_id`、发送时间、精华时间和正文缺失数被准确报告；
 - `get_msg` 补全失败不会中断整批；
 - 普通聊天仍按原 AstrBot 规则处理；
 - 验收命令不会进入 LLM。
+
+发送时间缺失是否允许进入阶段 B 由业务门禁决定。若必须恢复历史发送时间，应另行
+实现群历史消息分页，并按群号和 `message_id` 匹配；禁止用 `essence_time` 推断。
 
 ### 阶段 B：启用写库
 

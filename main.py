@@ -38,6 +38,9 @@ class GroupEssencePlugin(Star):
         self.service = GroupEssencePluginService(
             source=AstrBotEssenceSource(),
             repository=EssenceRepository(data_dir / "group_essence.db"),
+            validation_detail_request_limit=(
+                self.settings.max_validation_detail_requests
+            ),
         )
 
     @filter.command("精华验收")

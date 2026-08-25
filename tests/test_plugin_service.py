@@ -48,6 +48,8 @@ class FakeSource:
         self,
         _: object,
         __: str,
+        *,
+        detail_request_limit: int | None = None,
     ) -> list[EssenceMessage]:
         self.active += 1
         self.max_active = max(self.max_active, self.active)

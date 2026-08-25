@@ -71,6 +71,8 @@ class AstrBotEssenceSource:
         self,
         event: AstrBotEventLike,
         group_id: str,
+        *,
+        detail_request_limit: int | None = None,
     ) -> list[EssenceMessage]:
         normalized_group_id = str(group_id or "").strip()
         if not normalized_group_id:
@@ -97,6 +99,10 @@ class AstrBotEssenceSource:
         valid_items: list[Mapping[str, Any]] = []
         details: dict[str, Mapping[str, Any]] = {}
         detail_errors: dict[str, str] = {}
+        detail_requested_ids: set[str] = set()
+        normalized_detail_limit = _normalize_detail_request_limit(
+            detail_request_limit
+        )
         for item in items:
             if not isinstance(item, Mapping):
                 continue
@@ -105,8 +111,14 @@ class AstrBotEssenceSource:
                 continue
 
             message_id = get_message_id(item)
-            if not message_id:
+            if not message_id or message_id in detail_requested_ids:
                 continue
+            if (
+                normalized_detail_limit is not None
+                and len(detail_requested_ids) >= normalized_detail_limit
+            ):
+                continue
+            detail_requested_ids.add(message_id)
             try:
                 detail = await _call_action(
                     call_action,
@@ -123,6 +135,7 @@ class AstrBotEssenceSource:
             requested_group_id=normalized_group_id,
             details=details,
             detail_errors=detail_errors,
+            detail_requested_ids=detail_requested_ids,
         )
 
 
@@ -166,3 +179,12 @@ def _safe_fragment(value: Any, limit: int) -> str:
     )
     text = re.sub(r"(?<!\d)\d{5,}(?!\d)", "[id]", text)
     return text[:limit]
+
+
+def _normalize_detail_request_limit(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0

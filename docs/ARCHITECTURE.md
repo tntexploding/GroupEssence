@@ -38,7 +38,8 @@ CLI、API 和 AstrBot 入口只负责平台输入输出。HTTP 和 AstrBot 分�
 
 1. 独立应用的 `ingest_all` 在 `PREFER_ONEBOT=true` 时创建 `OneBotClient`。
 2. HTTP 客户端调用 `get_essence_msg_list`，`GROUP_ID` 是必填参数。
-3. 若精华项缺少 `sender_time` 或正文，HTTP 客户端按 `message_id` 调用 `get_msg`。
+3. 若精华项缺少正文，HTTP 客户端按 `message_id` 调用 `get_msg`；仅缺
+   `sender_time` 不触发详情请求。
 4. 时间戳统一为本地时间 `YYYY-MM-DD HH:MM:SS`；秒、毫秒、微秒和纳秒输入均可
    归一化。
 5. 纯文本、纯图片和混合图文分别标记为 `text`、`image` 和 `mixed`。多个图片
@@ -59,7 +60,7 @@ CLI、API 和 AstrBot 入口只负责平台输入输出。HTTP 和 AstrBot 分�
 QQ 指令
   -> AstrBot AIOCQHTTP 事件
   -> event.bot 的 call_action
-  -> get_essence_msg_list / 必要时 get_msg
+  -> get_essence_msg_list / 正文缺失时 get_msg
   -> normalization.py
   -> plugin_service.py
   -> AstrBot 数据卷中的 SQLite
@@ -67,7 +68,8 @@ QQ 指令
 
 插件不连接 NapCat HTTP 地址，也不保存 Token。`astrbot_source.py` 同时兼容 Action
 直接返回 data 与完整 OneBot envelope；status/retcode 异常只形成不含 payload 的
-公开错误。单条详情失败保留精华项，并只记录脱敏后的错误摘要。
+公开错误。单条详情失败保留精华项，并只记录脱敏后的错误摘要。仅缺发送时间的历史
+精华保持空值，不调用 `get_msg`，也不使用精华设置时间伪造发送时间。
 
 所有指令进入处理器后立即 `stop_event()`，因此不会继续进入 LLM。插件自身再次执行
 管理员 ID 和群白名单精确匹配；群聊查询固定使用当前群，私聊使用同时在白名单内的
@@ -75,7 +77,9 @@ QQ 指令
 
 `validation_mode=true` 时只有验收和状态可实际执行，初始化插件、验收和状态都不会
 创建数据库。关闭该模式后，同步才惰性初始化数据库，查询仍拒绝空关键词且每次限制
-在 1–20 条。同步、查询和审计等同步 SQLite 工作全部通过 `asyncio.to_thread` 执行，
+在 1–20 条。验收阶段只处理最多 `max_validation_detail_requests` 个正文缺失项，报告
+候选、实际请求、跳过和失败数，避免历史消息批量失败刷屏。同步、查询和审计等同步
+SQLite 工作全部通过 `asyncio.to_thread` 执行，
 服务实例用一个 `asyncio.Lock` 串行化 Action 与数据库操作，避免多个管理员命令重入。
 
 插件数据目录固定为 AstrBot 数据根目录下的
@@ -183,5 +187,7 @@ CSV 使用稳定列顺序。
 - 为需要 Cookie 或短期签名的图片源增加可插拔认证适配。
 - 使用 UI 区域分割提升截图字段识别准确率。
 - 数据量增长后引入 SQLite FTS5，并通过现有 schema 迁移机制升级索引。
+- 如业务必须补回历史发送时间，实现群历史分页拉取，并按群号与消息 ID 匹配；不从
+  精华时间或其他字段推断。
 - 若未来部署独立 HTTP 服务，为该服务增加鉴权、速率限制和结构化日志；AstrBot
   插件继续复用平台权限与现有 OneBot 连接。

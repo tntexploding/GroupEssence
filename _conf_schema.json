@@ -23,6 +23,12 @@
     "hint": "必须同时存在于允许访问的群号列表中。",
     "default": ""
   },
+  "max_validation_detail_requests": {
+    "description": "验收时最多补全正文数量",
+    "type": "int",
+    "hint": "只对正文缺失的精华调用 get_msg，代码会将该值限制在 0 到 50；0 表示验收时完全不补全。",
+    "default": 10
+  },
   "max_query_results": {
     "description": "单次查询最多返回数量",
     "type": "int",

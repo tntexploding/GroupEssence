@@ -88,9 +88,11 @@ def first_value(*values: Any) -> Any:
 
 
 def needs_message_detail(item: Mapping[str, Any]) -> bool:
-    return first_value(item.get("sender_time")) is None or first_value(
-        item.get("content")
-    ) is None
+    content_source = first_value(item.get("content"), item.get("message"))
+    if content_source is None:
+        return True
+    content_text, _, _, _ = parse_message_content({"content": content_source})
+    return content_text == "[空消息]"
 
 
 def get_message_id(item: Mapping[str, Any]) -> str:
@@ -103,6 +105,7 @@ def normalize_essence_item(
     requested_group_id: str,
     detail: Mapping[str, Any] | None = None,
     detail_error: str = "",
+    detail_requested: bool = False,
 ) -> EssenceMessage:
     detail_data = detail or {}
     sender_info = detail_data.get("sender")
@@ -115,6 +118,7 @@ def normalize_essence_item(
     essence_time = format_timestamp(item.get("operator_time"))
     content_source = first_value(
         item.get("content"),
+        item.get("message"),
         detail_data.get("message"),
         detail_data.get("content"),
         detail_data.get("raw_message"),
@@ -132,6 +136,8 @@ def normalize_essence_item(
         raw_data["message_detail"] = dict(detail_data)
     if detail_error:
         raw_data["message_detail_error"] = detail_error
+    if detail_requested:
+        raw_data["message_detail_requested"] = True
 
     return EssenceMessage(
         sender=str(
@@ -170,15 +176,18 @@ def normalize_essence_items(
     requested_group_id: str,
     details: Mapping[str, Mapping[str, Any]] | None = None,
     detail_errors: Mapping[str, str] | None = None,
+    detail_requested_ids: Iterable[str] | None = None,
 ) -> list[EssenceMessage]:
     detail_by_id = {str(key): value for key, value in (details or {}).items()}
     error_by_id = {str(key): value for key, value in (detail_errors or {}).items()}
+    requested_ids = {str(value) for value in (detail_requested_ids or ())}
     return [
         normalize_essence_item(
             item,
             requested_group_id=requested_group_id,
             detail=detail_by_id.get(get_message_id(item)),
             detail_error=error_by_id.get(get_message_id(item), ""),
+            detail_requested=get_message_id(item) in requested_ids,
         )
         for item in items
     ]

@@ -68,8 +68,10 @@ essence ingest --dry-run
 
 - `onebot_error` 应为空；
 - `from_onebot` 和 `collected` 应大于 0；
-- `quality.missing.group_id`、`sender_time`、`message_id` 应尽量为 0；
-- `quality.detail_errors` 应为 0；
+- `quality.missing.group_id`、`message_id` 应尽量为 0；
+- 单独记录 `quality.missing.sender_time`；仅缺发送时间不会触发 `get_msg`，也不会用
+  精华时间代填；
+- `quality.detail_errors` 应为 0；该值只来自正文缺失项的详情补全；
 - 输出不得包含真实消息正文。
 
 若失败，只保留错误信息和脱敏后的字段名称/类型；不要复制令牌、昵称或正文到 Issue。

@@ -102,6 +102,67 @@ class AstrBotSourceTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(api.calls, [("get_essence_msg_list", {"group_id": "group-test"})])
 
+    def test_content_present_without_sender_time_does_not_request_detail(self) -> None:
+        api = FakeActionApi(
+            {
+                "get_essence_msg_list": [
+                    [
+                        {
+                            "operator_time": 1_700_000_100,
+                            "message_id": "historical-1",
+                            "content": [
+                                {"type": "text", "data": {"text": "已有正文"}}
+                            ],
+                        }
+                    ]
+                ]
+            }
+        )
+
+        message = asyncio.run(
+            AstrBotEssenceSource().get_essence_messages(make_event(api), "123456")
+        )[0]
+
+        self.assertEqual(message.sender_time, "")
+        self.assertTrue(message.essence_time)
+        self.assertEqual(message.content_text, "已有正文")
+        self.assertNotIn("message_detail_requested", message.raw_data or {})
+        self.assertEqual(api.calls, [("get_essence_msg_list", {"group_id": 123456})])
+
+    def test_validation_detail_requests_honor_limit(self) -> None:
+        api = FakeActionApi(
+            {
+                "get_essence_msg_list": [
+                    [
+                        {"message_id": f"missing-{index}", "operator_time": 1}
+                        for index in range(3)
+                    ]
+                ],
+                "get_msg": [
+                    {"message": [{"type": "text", "data": {"text": "补全一"}}]},
+                    {"message": [{"type": "text", "data": {"text": "补全二"}}]},
+                ],
+            }
+        )
+
+        messages = asyncio.run(
+            AstrBotEssenceSource().get_essence_messages(
+                make_event(api),
+                "123456",
+                detail_request_limit=2,
+            )
+        )
+
+        self.assertEqual([call[0] for call in api.calls].count("get_msg"), 2)
+        self.assertEqual(
+            sum(
+                bool((message.raw_data or {}).get("message_detail_requested"))
+                for message in messages
+            ),
+            2,
+        )
+        self.assertEqual(messages[2].content_text, "[空消息]")
+
     def test_failed_detail_is_safely_recorded_without_dropping_item(self) -> None:
         api = FakeActionApi(
             {

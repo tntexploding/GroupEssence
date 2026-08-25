@@ -20,6 +20,7 @@ class PluginSettings:
     admin_ids: frozenset[str]
     allowed_group_ids: frozenset[str]
     default_group_id: str
+    max_validation_detail_requests: int
     max_query_results: int
     max_content_chars: int
     enable_image_enrichment: bool
@@ -35,6 +36,9 @@ class PluginSettings:
             ),
             allowed_group_ids=frozenset(_string_list(values.get("allowed_group_ids"))),
             default_group_id=str(values.get("default_group_id") or "").strip(),
+            max_validation_detail_requests=_clamp_int(
+                values.get("max_validation_detail_requests"), 10, 0, 50
+            ),
             max_query_results=_clamp_int(values.get("max_query_results"), 5, 1, 20),
             max_content_chars=_clamp_int(values.get("max_content_chars"), 300, 50, 2000),
             enable_image_enrichment=_as_bool(

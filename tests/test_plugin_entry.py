@@ -83,7 +83,9 @@ class FakeService:
                 "essence_time": "int",
                 "content": "list",
             },
+            detail_candidates=0,
             detail_requested=0,
+            detail_skipped=0,
             detail_failed=0,
         )
 
@@ -189,6 +191,7 @@ class PluginEntryTests(unittest.TestCase):
                     },
                 )
                 self.assertFalse((data_root / "plugin_data").exists())
+                self.assertEqual(plugin.service.validation_detail_request_limit, 10)
                 plugin.service = FakeService()
                 event = FakeEvent()
 

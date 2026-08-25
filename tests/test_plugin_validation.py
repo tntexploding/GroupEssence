@@ -10,6 +10,7 @@ from group_essence_extractor.models import EssenceMessage
 from group_essence_extractor.plugin_config import PluginSettings
 from group_essence_extractor.plugin_service import (
     GroupEssencePluginService,
+    build_validation_report,
     format_status_report,
     format_validation_report,
 )
@@ -31,13 +32,17 @@ class FakeSource:
     def __init__(self, messages: list[EssenceMessage]) -> None:
         self.messages = messages
         self.calls: list[str] = []
+        self.detail_limits: list[int | None] = []
 
     async def get_essence_messages(
         self,
         _: object,
         group_id: str,
+        *,
+        detail_request_limit: int | None = None,
     ) -> list[EssenceMessage]:
         self.calls.append(group_id)
+        self.detail_limits.append(detail_request_limit)
         return self.messages
 
 
@@ -70,6 +75,7 @@ class PluginValidationTests(unittest.TestCase):
                 "admin_ids": ["admin"],
                 "allowed_group_ids": ["123456"],
                 "default_group_id": "123456",
+                "max_validation_detail_requests": 100,
                 "max_query_results": 100,
             }
         )
@@ -85,6 +91,7 @@ class PluginValidationTests(unittest.TestCase):
             "123456",
         )
         self.assertEqual(settings.max_query_results, 20)
+        self.assertEqual(settings.max_validation_detail_requests, 50)
 
     def test_validation_and_status_do_not_create_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -100,7 +107,10 @@ class PluginValidationTests(unittest.TestCase):
 
             self.assertEqual(report.collected, 1)
             self.assertEqual(report.detail_requested, 0)
+            self.assertEqual(report.detail_candidates, 0)
+            self.assertEqual(report.detail_skipped, 0)
             self.assertEqual(report.field_types["message_id"], "str")
+            self.assertEqual(source.detail_limits, [10])
             self.assertFalse(status.database_exists)
             self.assertFalse(db_path.exists())
             output = format_validation_report(report)
@@ -116,6 +126,33 @@ class PluginValidationTests(unittest.TestCase):
             )
             self.assertIn("只读验收", status_output)
             self.assertIn("未初始化", status_output)
+
+    def test_validation_report_distinguishes_candidates_requests_and_skips(self) -> None:
+        messages: list[EssenceMessage] = []
+        for index in range(3):
+            message = make_message()
+            message.message_id = f"missing-{index}"
+            message.content_text = "[空消息]"
+            message.raw_data = {
+                "essence": {
+                    "message_id": message.message_id,
+                    "content": [],
+                }
+            }
+            messages.append(message)
+        messages[0].raw_data = {
+            **(messages[0].raw_data or {}),
+            "message_detail_requested": True,
+            "message_detail_error": "safe error",
+        }
+
+        report = build_validation_report(messages)
+
+        self.assertEqual(report.detail_candidates, 3)
+        self.assertEqual(report.detail_requested, 1)
+        self.assertEqual(report.detail_skipped, 2)
+        self.assertEqual(report.detail_failed, 1)
+        self.assertIn("候选=3, 请求=1, 跳过=2, 失败=1", format_validation_report(report))
 
 
 if __name__ == "__main__":

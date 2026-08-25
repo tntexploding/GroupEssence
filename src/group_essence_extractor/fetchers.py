@@ -49,6 +49,7 @@ class OneBotClient:
         valid_items: list[dict[str, Any]] = []
         details: dict[str, dict[str, Any]] = {}
         detail_errors: dict[str, str] = {}
+        detail_requested_ids: set[str] = set()
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -59,6 +60,7 @@ class OneBotClient:
             message_id = get_message_id(item)
             if not message_id:
                 continue
+            detail_requested_ids.add(message_id)
             try:
                 detail_data = self._post_action("get_msg", {"message_id": message_id})
                 if isinstance(detail_data, dict):
@@ -72,6 +74,7 @@ class OneBotClient:
             requested_group_id=group_id,
             details=details,
             detail_errors=detail_errors,
+            detail_requested_ids=detail_requested_ids,
         )
 
     def _post_action(self, action: str, payload: dict[str, Any]) -> Any:

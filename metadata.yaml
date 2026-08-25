@@ -4,7 +4,7 @@ short_desc: 通过 AstrBot 现有 OneBot 链路验收、同步和查询 QQ 群�
 desc: |
   复用 GroupEssence 标准化与 SQLite 核心，通过管理员白名单指令访问已授权群。
   默认只读验收，不新增 NapCat HTTP 端口，也不保存 NapCat Token。
-version: 0.2.0
+version: 0.2.1
 author: tntexploding
 repo: https://github.com/tntexploding/GroupEssence
 astrbot_version: ">=4.0.0,<5"

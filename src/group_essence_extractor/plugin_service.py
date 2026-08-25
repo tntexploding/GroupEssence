@@ -27,7 +27,9 @@ class ValidationReport:
     by_content_type: dict[str, int]
     missing: dict[str, int]
     field_types: dict[str, str]
+    detail_candidates: int
     detail_requested: int
+    detail_skipped: int
     detail_failed: int
 
 
@@ -58,14 +60,23 @@ class GroupEssencePluginService:
         self,
         source: AstrBotEssenceSource,
         repository: EssenceRepository,
+        validation_detail_request_limit: int = 10,
     ) -> None:
         self.source = source
         self.repository = repository
+        self.validation_detail_request_limit = max(
+            0,
+            min(int(validation_detail_request_limit), 50),
+        )
         self.operation_lock = asyncio.Lock()
 
     async def validate(self, event: Any, group_id: str) -> ValidationReport:
         async with self.operation_lock:
-            messages = await self.source.get_essence_messages(event, group_id)
+            messages = await self.source.get_essence_messages(
+                event,
+                group_id,
+                detail_request_limit=self.validation_detail_request_limit,
+            )
         return build_validation_report(messages)
 
     async def sync(self, event: Any, group_id: str) -> SyncReport:
@@ -163,6 +174,11 @@ def build_validation_report(messages: list[EssenceMessage]) -> ValidationReport:
         report_name: _type_summary(item.get(source_name) for item in raw_items)
         for report_name, source_name in VALIDATION_FIELDS.items()
     }
+    detail_candidates = sum(needs_message_detail(item) for item in raw_items)
+    detail_requested = sum(
+        bool((message.raw_data or {}).get("message_detail_requested"))
+        for message in messages
+    )
     return ValidationReport(
         collected=len(messages),
         by_content_type=dict(
@@ -170,7 +186,9 @@ def build_validation_report(messages: list[EssenceMessage]) -> ValidationReport:
         ),
         missing=missing,
         field_types=field_types,
-        detail_requested=sum(needs_message_detail(item) for item in raw_items),
+        detail_candidates=detail_candidates,
+        detail_requested=detail_requested,
+        detail_skipped=max(0, detail_candidates - detail_requested),
         detail_failed=sum(
             bool((message.raw_data or {}).get("message_detail_error"))
             for message in messages
@@ -192,7 +210,9 @@ def format_validation_report(report: ValidationReport) -> str:
             f"内容类型：{content_types}",
             f"缺失字段：{missing}",
             f"字段类型：{field_types}",
-            f"详情补全：请求={report.detail_requested}, 失败={report.detail_failed}",
+            "详情补全："
+            f"候选={report.detail_candidates}, 请求={report.detail_requested}, "
+            f"跳过={report.detail_skipped}, 失败={report.detail_failed}",
         )
     )
 
