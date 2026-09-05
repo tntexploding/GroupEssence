@@ -8,6 +8,7 @@ import sys
 import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
+from unittest.mock import Mock
 from typing import Iterator
 
 
@@ -64,6 +65,9 @@ class FakeEvent:
 
     def plain_result(self, text: str) -> str:
         return text
+
+    def chain_result(self, components):
+        return components
 
 
 class FakeService:
@@ -147,6 +151,7 @@ def load_plugin_main(data_root: Path) -> Iterator[ModuleType]:
         "astrbot",
         "astrbot.api",
         "astrbot.api.event",
+        "astrbot.api.message_components",
         "astrbot.api.star",
         "astrbot.core",
         "astrbot.core.utils",
@@ -163,6 +168,9 @@ def load_plugin_main(data_root: Path) -> Iterator[ModuleType]:
     event = ModuleType("astrbot.api.event")
     event.AstrMessageEvent = object  # type: ignore[attr-defined]
     event.filter = FakeFilter()  # type: ignore[attr-defined]
+    components = ModuleType("astrbot.api.message_components")
+    components.Plain = lambda text: {"type": "text", "text": text}
+    components.Image = SimpleNamespace(fromBytes=lambda data: {"type": "image", "bytes": data})
     star = ModuleType("astrbot.api.star")
     star.Context = object  # type: ignore[attr-defined]
     star.Star = FakeStar  # type: ignore[attr-defined]
@@ -177,6 +185,7 @@ def load_plugin_main(data_root: Path) -> Iterator[ModuleType]:
         "astrbot": astrbot,
         "astrbot.api": api,
         "astrbot.api.event": event,
+        "astrbot.api.message_components": components,
         "astrbot.api.star": star,
         "astrbot.core": core,
         "astrbot.core.utils": utils,
@@ -213,6 +222,56 @@ async def collect_results(generator: object) -> list[str]:
 
 
 class PluginEntryTests(unittest.TestCase):
+    def test_recent_and_search_return_images_after_text_without_llm(self):
+        for command in ("recent_essence", "search_essence"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as temp:
+                with load_plugin_main(Path(temp)) as plugin_main:
+                    plugin = plugin_main.GroupEssencePlugin(object(), {
+                        "admin_ids": ["admin"], "allowed_group_ids": ["123456"],
+                        "validation_mode": False, "max_reply_images": 2,
+                    })
+                    page = SimpleNamespace(items=[{"group_id": "123456", "content_type": "image", "content_text": "[图片消息]", "image_path": "https://gchat.qpic.cn/fixture.png"}], total=1)
+                    async def query(*args):
+                        return page
+                    plugin.service.recent = query
+                    plugin.service.search = query
+                    png = b"\x89PNG\r\n\x1a\nfixture-image"
+                    plugin.image_cache.fetcher = Mock(return_value=png)
+                    arg = "1" if command == "recent_essence" else "图片"
+                    event = FakeEvent()
+                    result = asyncio.run(collect_results(getattr(plugin, command)(event, arg)))
+                    self.assertIn("[图片消息]", result[0])
+                    self.assertEqual(result[1][1], {"type": "image", "bytes": png})
+                    self.assertIn("[1/1]", result[1][0]["text"])
+                    self.assertEqual(event.stop_calls, 1)
+
+    def test_image_failure_preserves_text_and_redacts_exception(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with load_plugin_main(Path(temp)) as plugin_main:
+                plugin = plugin_main.GroupEssencePlugin(object(), {
+                    "admin_ids": ["admin"], "allowed_group_ids": ["123456"], "validation_mode": False,
+                })
+                async def recent(*args):
+                    return SimpleNamespace(items=[{"group_id": "123456", "content_text": "保留文字", "image_path": "https://gchat.qpic.cn/secret"}], total=1)
+                plugin.service.recent = recent
+                plugin.image_cache.fetcher = Mock(side_effect=OSError("https://secret/token=secret"))
+                result = asyncio.run(collect_results(plugin.recent_essence(FakeEvent(), "1")))
+                self.assertIn("保留文字", result[0])
+                self.assertIn("图片读取失败", result[1])
+                self.assertNotIn("secret", str(result))
+
+    def test_unauthorized_user_never_downloads_images(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with load_plugin_main(Path(temp)) as plugin_main:
+                plugin = plugin_main.GroupEssencePlugin(object(), {
+                    "admin_ids": ["admin"], "allowed_group_ids": ["123456"], "validation_mode": False,
+                })
+                plugin.image_cache.fetcher = Mock()
+                result = asyncio.run(collect_results(plugin.recent_essence(FakeEvent(sender_id="member"), "1")))
+                self.assertIn("无权限", result[0])
+                plugin.image_cache.fetcher.assert_not_called()
+                self.assertFalse((Path(temp) / "plugin_data").exists())
+
     def test_astrbot_lifecycle_starts_and_stops_the_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             with load_plugin_main(Path(temp)) as plugin_main:

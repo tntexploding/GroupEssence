@@ -57,8 +57,14 @@
   "enable_image_enrichment": {
     "description": "启用图片补全",
     "type": "bool",
-    "hint": "当前插件运行时不执行图片下载或 OCR，请保持关闭。",
+    "hint": "仅为离线 OCR 补全预留，请保持关闭。查询图片回传由 max_reply_images 控制。",
     "default": false
+  },
+  "max_reply_images": {
+    "description": "单次查询最多回传图片数",
+    "type": "int",
+    "hint": "0 关闭，范围 0–10，默认 5。每张最多 5 MiB，查询按需下载并缓存，不调用 OCR 或 LLM。",
+    "default": 5
   },
   "enable_scheduled_sync": {
     "description": "启用计划同步",

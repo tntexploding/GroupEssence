@@ -25,6 +25,7 @@ class PluginSettings:
     history_query_limit: int
     max_query_results: int
     max_content_chars: int
+    max_reply_images: int
     enable_image_enrichment: bool
     enable_scheduled_sync: bool
     onebot_platform_id: str
@@ -64,6 +65,7 @@ class PluginSettings:
             ),
             max_query_results=_clamp_int(values.get("max_query_results"), 5, 1, 20),
             max_content_chars=_clamp_int(values.get("max_content_chars"), 300, 50, 2000),
+            max_reply_images=_clamp_int(values.get("max_reply_images"), 5, 0, 10),
             enable_image_enrichment=_as_bool(
                 values.get("enable_image_enrichment"), False
             ),

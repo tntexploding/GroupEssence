@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
@@ -11,6 +14,7 @@ from .src.group_essence_extractor.astrbot_source import (
 )
 from .src.group_essence_extractor.astrbot_gateway import AstrBotOneBotGateway
 from .src.group_essence_extractor.db import EssenceRepository
+from .src.group_essence_extractor.image_reply import ImageReplyCache
 from .src.group_essence_extractor.plugin_config import PluginSettings
 from .src.group_essence_extractor.plugin_identity import (
     PLUGIN_DATABASE_FILENAME,
@@ -39,6 +43,8 @@ class GroupEssencePlugin(Star):
         super().__init__(context)
         self.settings = PluginSettings.from_mapping(config)
         data_dir = resolve_plugin_data_dir(get_astrbot_data_path())
+        self.image_cache = ImageReplyCache(data_dir / "reply_images")
+        self.image_reply_lock = asyncio.Lock()
         repository = EssenceRepository(
             data_dir / PLUGIN_DATABASE_FILENAME,
             backup_dir=data_dir / "backups",
@@ -261,12 +267,8 @@ class GroupEssencePlugin(Star):
             return
 
         logger.info(f"GroupEssence 查询完成：count={len(page.items)}, total={page.total}")
-        yield event.plain_result(
-            format_search_page(
-                page,
-                max_content_chars=self.settings.max_content_chars,
-            )
-        )
+        async for result in self._query_results(event, page, "精华查询结果"):
+            yield result
 
     @filter.command("精华最近")
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
@@ -305,13 +307,37 @@ class GroupEssencePlugin(Star):
             return
 
         logger.info(f"GroupEssence 最近记录读取完成：count={len(page.items)}")
+        async for result in self._query_results(event, page, "最近精华"):
+            yield result
+
+    async def _query_results(self, event, page, title):
+        # Send text first: unavailable/expired images never erase the query results.
         yield event.plain_result(
             format_search_page(
                 page,
                 max_content_chars=self.settings.max_content_chars,
-                title="最近精华",
+                title=title,
             )
         )
+        if not self.settings.max_reply_images or not page.items:
+            return
+        async with self.image_reply_lock:
+            images, omitted = await asyncio.to_thread(
+                self.image_cache.prepare, page.items, self.settings.max_reply_images,
+            )
+        failures = 0
+        for image in images:
+            label = f"精华 [{image.record_number}/{len(page.items)}] 图片 {image.image_number}/{image.image_total}"
+            if image.error:
+                failures += 1
+                yield event.plain_result(f"{label}：{image.error}")
+            else:
+                # Bytes, not a file path: AstrBot and NapCat have separate filesystems.
+                yield event.chain_result([Plain(label + "\n"), Image.fromBytes(image.data)])
+        if omitted:
+            yield event.plain_result(f"本次达到图片数量上限，另有 {omitted} 张未发送。可缩小查询范围。")
+        if images:
+            logger.info(f"GroupEssence 图片准备完成：count={len(images)}, failed={failures}, omitted={omitted}")
 
     async def terminate(self) -> None:
         await self.runtime.stop()
